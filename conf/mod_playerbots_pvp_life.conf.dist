@@ -1,0 +1,210 @@
+###################################################################################################
+# Playerbots PvP Life Module
+###################################################################################################
+
+[worldserver]
+
+# Enable or disable the module.
+PvPLife.Enable = 1
+
+# Output detailed server debug logs.
+PvPLife.Debug = 0
+
+# Broadcast system announcements to the entire server when activities start or end.
+# Recommended to keep disabled for a more natural player-like atmosphere.
+PvPLife.Announce = 0
+
+# Delay in seconds after worldserver startup before the module begins activities.
+PvPLife.StartupDelaySeconds = 90
+
+# Activity management tick interval in seconds.
+PvPLife.TickSeconds = 20
+
+###################################################################################################
+# Bot Selection and Movement
+###################################################################################################
+
+# Use mod-playerbots random bot account prefix when available.
+PvPLife.Bots.UsePlayerbotConfig = 1
+
+# "auto" uses the prefix from mod-playerbots. Specify manually only if needed.
+PvPLife.Bots.AccountPrefix = "auto"
+
+# Optionally restrict the account ID range. If both values are 0, no restriction is applied.
+PvPLife.Bots.AccountMin = 0
+PvPLife.Bots.AccountMax = 0
+
+PvPLife.Bots.QueryLimit = 500
+
+# Do not borrow bots participating in party, raid, or dungeon groups with real players.
+PvPLife.Bots.SkipGrouped = 1
+
+# If enabled, only bots that pass Playerbots activity criteria are assigned.
+# Keep disabled in PvP Life; BotActiveAlone conditions may exclude most or all random bots.
+PvPLife.Bots.RespectPlayerbotActivity = 0
+
+# If necessary, start activities with fewer bots than the randomized target count.
+# Both sides must have at least MinimumPerSide eligible bots.
+PvPLife.Bots.AllowPartialTeams = 1
+PvPLife.Bots.MinimumPerSide = 1
+
+# Return participating bots to their original locations when the activity ends.
+PvPLife.Bots.ReturnAfterActivity = 1
+
+# Move to combat area via MovePoint after the initial rally placement.
+PvPLife.Movement.UseMovePoint = 1
+
+# Random offset range (in yards) added to positions to prevent bots from stacking.
+PvPLife.Movement.PositionJitter = 10
+
+# Stagger bot arrivals with random delays instead of moving all bots simultaneously.
+PvPLife.Movement.ArrivalStaggerMinSeconds = 2
+PvPLife.Movement.ArrivalStaggerMaxSeconds = 12
+PvPLife.Movement.MoveAfterArrivalMinSeconds = 6
+PvPLife.Movement.MoveAfterArrivalMaxSeconds = 20
+
+# Safety cap on the number of bots that can be assigned per faction in a single activity.
+# This does not spawn new bots; it only limits the maximum from zone population settings below.
+PvPLife.Bots.MaxPerSide = 100
+
+###################################################################################################
+# Persistent World PvP
+###################################################################################################
+
+# Ensure outdoor PvP is actively running in at least one zone whenever possible.
+PvPLife.World.AlwaysActive = 1
+
+# Number of normal outdoor PvP hotspots to keep active concurrently.
+PvPLife.World.MinActiveHotspots = 1
+PvPLife.World.MaxActiveHotspots = 3
+
+# Chance (percentage) per management tick to start an additional activity when below MaxActiveHotspots.
+PvPLife.World.RandomStartChance = 35
+
+###################################################################################################
+# Per-Zone Populations
+###################################################################################################
+
+# For auto-start, the zone must be enabled both here and in the pvp_life_zone DB table.
+# 1 = enabled, 0 = disabled. GMs can force-start disabled zones using .pvplife start <name>.
+# MinPopulation and MaxPopulation represent the total combined bot count for both factions in that zone.
+# A random total is chosen within this range and split between attacking and defending factions.
+# Faction ratio follows settings in the pvp_life_zone DB table.
+# The total population cap is twice PvPLife.Bots.MaxPerSide.
+PvPLife.Zone.StormwindDuel.Enable = 1
+PvPLife.Zone.StormwindDuel.MinPopulation = 8
+PvPLife.Zone.StormwindDuel.MaxPopulation = 16
+PvPLife.Zone.OrgrimmarDuel.Enable = 1
+PvPLife.Zone.OrgrimmarDuel.MinPopulation = 8
+PvPLife.Zone.OrgrimmarDuel.MaxPopulation = 16
+PvPLife.Zone.STV_Nesingwary.Enable = 1
+PvPLife.Zone.STV_Nesingwary.MinPopulation = 10
+PvPLife.Zone.STV_Nesingwary.MaxPopulation = 20
+PvPLife.Zone.STV_Gurubashi.Enable = 1
+PvPLife.Zone.STV_Gurubashi.MinPopulation = 12
+PvPLife.Zone.STV_Gurubashi.MaxPopulation = 24
+PvPLife.Zone.Tanaris_Gadgetzan.Enable = 1
+PvPLife.Zone.Tanaris_Gadgetzan.MinPopulation = 10
+PvPLife.Zone.Tanaris_Gadgetzan.MaxPopulation = 20
+PvPLife.Zone.DarkPortal_Azeroth.Enable = 1
+PvPLife.Zone.DarkPortal_Azeroth.MinPopulation = 12
+PvPLife.Zone.DarkPortal_Azeroth.MaxPopulation = 28
+PvPLife.Zone.DarkPortal_Outland.Enable = 1
+PvPLife.Zone.DarkPortal_Outland.MinPopulation = 12
+PvPLife.Zone.DarkPortal_Outland.MaxPopulation = 28
+PvPLife.Zone.Shattrath_Outskirts.Enable = 1
+PvPLife.Zone.Shattrath_Outskirts.MinPopulation = 10
+PvPLife.Zone.Shattrath_Outskirts.MaxPopulation = 24
+PvPLife.Zone.K3_StormPeaks.Enable = 1
+PvPLife.Zone.K3_StormPeaks.MinPopulation = 10
+PvPLife.Zone.K3_StormPeaks.MaxPopulation = 24
+PvPLife.Zone.Wintergrasp.Enable = 1
+PvPLife.Zone.Wintergrasp.MinPopulation = 10
+PvPLife.Zone.Wintergrasp.MaxPopulation = 24
+PvPLife.Zone.Goldshire_Roaming.Enable = 1
+PvPLife.Zone.Goldshire_Roaming.MinPopulation = 4
+PvPLife.Zone.Goldshire_Roaming.MaxPopulation = 10
+PvPLife.Zone.Durotar_Roaming.Enable = 1
+PvPLife.Zone.Durotar_Roaming.MinPopulation = 4
+PvPLife.Zone.Durotar_Roaming.MaxPopulation = 10
+PvPLife.Zone.Orgrimmar_Zeppelin.Enable = 0
+PvPLife.Zone.Orgrimmar_Zeppelin.MinPopulation = 4
+PvPLife.Zone.Orgrimmar_Zeppelin.MaxPopulation = 12
+PvPLife.Zone.ForTheHorde_Stormwind.Enable = 1
+PvPLife.Zone.ForTheHorde_Stormwind.MinPopulation = 12
+PvPLife.Zone.ForTheHorde_Stormwind.MaxPopulation = 28
+PvPLife.Zone.ForTheAlliance_Orgrimmar.Enable = 1
+PvPLife.Zone.ForTheAlliance_Orgrimmar.MinPopulation = 12
+PvPLife.Zone.ForTheAlliance_Orgrimmar.MaxPopulation = 28
+
+###################################################################################################
+# Duel Zones
+###################################################################################################
+
+PvPLife.Duel.Enable = 1
+
+# Keep bots persistently stationed in active duel zones.
+PvPLife.Duel.AlwaysActive = 1
+
+# WotLK client duel challenge spell ID.
+PvPLife.Duel.SpellId = 7266
+
+# Maximum number of bot-vs-bot duel pairs to schedule in a single duel zone activation.
+PvPLife.Duel.PairLimit = 12
+PvPLife.Duel.PairDelayMinSeconds = 5
+PvPLife.Duel.PairDelayMaxSeconds = 18
+
+# Keep dueling bots anchored near the midpoint between rally and target spots.
+PvPLife.Duel.LeashRadius = 40
+
+# Interval (in ms) to verify idle duel bots remain near their assigned position.
+# This tethering does not interrupt active duels or combat movement.
+PvPLife.Duel.GuardIntervalMs = 1000
+
+# Allow bots to challenge nearby real players to duels.
+PvPLife.Duel.ChallengeRealPlayers = 1
+PvPLife.Duel.PlayerChallengeChance = 25
+PvPLife.Duel.PlayerScanRadius = 55
+
+# Maximum level difference allowed. For example, 5 means a level 10 bot only challenges players level 5-15.
+PvPLife.Duel.MaxLevelDifference = 5
+
+# Cooldown to prevent repeatedly challenging the same player or bot.
+PvPLife.Duel.PlayerChallengeCooldownSeconds = 900
+PvPLife.Duel.BotChallengeCooldownSeconds = 180
+
+# Cooldown before the same bot can be assigned to another bot-vs-bot duel.
+PvPLife.Duel.BotVsBotCooldownSeconds = 45
+
+# Maximum level difference allowed in bot-vs-bot duels.
+PvPLife.Duel.BotVsBotMaxLevelDifference = 5
+
+###################################################################################################
+# For the Horde / For the Alliance Campaigns
+###################################################################################################
+
+# Faction campaigns attacking enemy capitals or territories.
+# Handled as normal outdoor PvP activities without global broadcast spam.
+PvPLife.ForTheHorde.Enable = 1
+PvPLife.ForTheAlliance.Enable = 1
+
+# Chance per management tick to initiate a faction campaign after the global cooldown expires.
+PvPLife.FactionCampaign.ChancePerTick = 12
+PvPLife.FactionCampaign.GlobalCooldownSeconds = 3600
+
+###################################################################################################
+# Natural Bot Chatter
+###################################################################################################
+
+# Primarily used in faction capital battles. Dialogue is stored in pvp_life_chat.
+PvPLife.BotChat.Enable = 1
+PvPLife.BotChat.YellChance = 70
+PvPLife.BotChat.WorldChance = 35
+
+###################################################################################################
+# Playerbot AI Strategies
+###################################################################################################
+
+PvPLife.Strategies.Combat = "+pvp,+boost,+dps debuff,-passive,-stay"
+PvPLife.Strategies.NonCombat = "+pvp,+boost,-passive,-stay"
+PvPLife.Strategies.DuelNonCombat = "+duel,+pvp,+boost,+stay,-follow,-passive,-grind"
