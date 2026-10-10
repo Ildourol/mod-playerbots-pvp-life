@@ -26,7 +26,9 @@ namespace PvPLife
 
         void LoadConfig();
         void Update(uint32 diff);
+        void Shutdown();
         bool HandleCommand(ChatHandler* handler, std::string const& text);
+        bool HandleWpvpCommand(ChatHandler* handler, std::string const& text);
 
     private:
         Manager() = default;
@@ -43,12 +45,15 @@ namespace PvPLife
 
         std::vector<BotCandidate> LoadCandidates(TeamSide team, uint8 minLevel, uint8 maxLevel,
             std::unordered_set<uint32> const& excluded);
+        std::vector<BotCandidate> LoadOfflineCandidates(TeamSide team, uint8 level,
+            std::unordered_set<uint32> const& excluded);
         Player* FindPlayer(uint32 guidLow) const;
         TeamSide TeamForRace(uint8 race) const;
         bool IsConfiguredBotAccount(uint32 accountId);
         bool IsSafeBot(Player* player) const;
         bool IsRealPlayer(Player* player) const;
         bool IsParticipant(uint32 guidLow) const;
+        uint8 EffectiveMinLevel(uint8 minLevel) const;
 
         bool StartZone(Zone const& zone, ChatHandler* handler = nullptr, bool forced = false);
         void EndEvent(ActiveEvent const& event, std::string const& reason);
@@ -58,13 +63,23 @@ namespace PvPLife
         void TryStartRandomSkirmish();
         void TryStartFactionCampaign();
 
-        void ScheduleMove(uint64 eventId, uint32 guidLow, uint32 mapId, float x, float y, float z, float o,
-            uint32 delaySeconds, bool teleport);
-        void ScheduleDuel(uint64 eventId, uint32 challengerGuid, uint32 targetGuid, uint32 delaySeconds,
+        // Reactive Raid Response
+        void TryQueueReactiveRaidResponse();
+        void StartPendingRaidResponses();
+        void CancelPendingRaidResponse(uint64 responseId, std::string const& reason);
+
+        // Movement, combat engagement and duels
+        void ScheduleMove(uint64 eventId, uint32 guidLow, std::string const& name, uint32 mapId,
+            float x, float y, float z, float o, uint32 delaySeconds, bool teleport);
+        void ScheduleDuel(uint64 eventId, uint32 challengerGuid, uint32 targetGuid,
+            std::string const& challengerName, std::string const& targetName, uint32 delaySeconds,
             bool realPlayerTarget = false);
+        void ScheduleEngagement(uint64 eventId, uint32 botGuid, uint32 targetGuid, uint32 delaySeconds);
         void ScheduleEventChat(ActiveEvent const& event);
+
         void ProcessMoveQueue();
         void ProcessDuelQueue();
+        void ProcessEngagementQueue();
         void ProcessChatQueue();
         void ProcessRealPlayerChallenges();
         void MaintainDuelParticipants();
@@ -72,15 +87,28 @@ namespace PvPLife
 
         void ApplyPvpStrategies(Player* player, bool duelMode) const;
         void MoveBot(Player* player, uint32 mapId, float x, float y, float z, float o, bool teleport) const;
+        void EngageTarget(Player* bot, Player* target);
         float Jitter() const;
+        uint32 CalculatePopulationBudget() const;
         void CalculatePopulation(Zone const& zone, uint32& attackerCount, uint32& defenderCount) const;
+        uint32 RandomCount(uint32 minCount, uint32 maxCount) const;
 
+        void AuditLog(std::string const& tag, std::string const& text) const;
         std::string RandomChatLine(ActivityType type, ChatChannel channel, TeamSide speakerTeam);
         void Announce(std::string const& text) const;
         void PrintStatus(ChatHandler* handler) const;
-        void PrintHelp(ChatHandler* handler) const;
+        void PrintScan(ChatHandler* handler, uint8 minLevel, uint8 maxLevel) const;
+        void PrintHelp(ChatHandler* handler, bool isWpvp = false) const;
+        void PrintCompat(ChatHandler* handler) const;
+        void PrintReservations(ChatHandler* handler) const;
+        void PrintDebugStatus(ChatHandler* handler) const;
         bool HandleZoneCommand(ChatHandler* handler, std::vector<std::string> const& args);
+        bool HandleSpotCommand(ChatHandler* handler, std::vector<std::string> const& args);
+        bool HandleResponseCommand(ChatHandler* handler, std::vector<std::string> const& args);
+        bool HandleDebugCommand(ChatHandler* handler, std::vector<std::string> const& args);
+        void StopEventById(uint64 id, ChatHandler* handler);
 
+        // Master & timing
         bool _enable = true;
         bool _databaseReady = false;
         bool _debug = false;
@@ -89,30 +117,53 @@ namespace PvPLife
         uint32 _tickSeconds = 20;
         uint32 _timerMs = 0;
         uint32 _startupElapsedMs = 0;
+        bool _startupDelayLogged = false;
+        uint32 _maxActiveEvents = 0;
 
+        // Bot selection & filtering
+        bool _requireBotEligibility = true;
         bool _usePlayerbotConfig = true;
         std::string _botAccountPrefix = "auto";
         uint32 _botAccountMin = 0;
         uint32 _botAccountMax = 0;
+        AccountFilterMode _accountFilterMode = AccountFilterMode::LegacyAny;
         uint32 _botQueryLimit = 500;
+        uint32 _minOnlineRequired = 3;
+        uint8 _globalMinLevel = 20;
         bool _skipGroupedBots = true;
         bool _respectPlayerbotActivity = false;
         bool _allowPartialTeams = true;
         uint32 _minimumBotsPerSide = 1;
+        uint32 _maxBotsPerSide = 100;
         bool _returnBots = true;
+
+        // Movement & combat
+        bool _teleportOnArrival = true;
         bool _useMovePoint = true;
+        bool _hardTeleportToTarget = false;
         uint32 _positionJitter = 10;
         uint32 _arrivalStaggerMin = 2;
         uint32 _arrivalStaggerMax = 12;
         uint32 _moveAfterArrivalMin = 6;
         uint32 _moveAfterArrivalMax = 20;
-        uint32 _maxBotsPerSide = 100;
+        bool _strategiesEnable = true;
+        bool _forcePvpFlag = true;
+        bool _forceAttackOnEngage = true;
+        uint32 _engageAfterMoveSeconds = 4;
+        uint32 _engageRetrySeconds = 5;
+        uint32 _engageMaxRetries = 12;
 
+        std::string _pvpCombatStrategies = "+pvp,+boost,+dps debuff,-passive,-stay";
+        std::string _pvpNonCombatStrategies = "+pvp,+boost,-passive,-stay";
+        std::string _duelNonCombatStrategies = "+duel,+pvp,+boost,+stay,-follow,-passive,-grind";
+
+        // Persistent World PvP
         bool _alwaysActiveWorldPvp = true;
         uint32 _minActiveSkirmishes = 1;
         uint32 _maxActiveSkirmishes = 3;
         uint32 _randomSkirmishChance = 35;
 
+        // Duel zones
         bool _duelEnable = true;
         bool _duelAlwaysActive = true;
         uint32 _duelSpellId = 7266;
@@ -131,24 +182,66 @@ namespace PvPLife
         uint32 _botDuelCooldownSeconds = 45;
         uint32 _botDuelMaxLevelDifference = 5;
 
+        // Campaigns & chatter
         bool _forTheHordeEnable = true;
         bool _forTheAllianceEnable = true;
         uint32 _factionCampaignChance = 12;
         uint32 _factionCampaignGlobalCooldown = 3600;
         uint32 _lastFactionCampaign = 0;
-
         bool _botChatEnable = true;
         uint32 _botChatYellChance = 70;
         uint32 _botChatWorldChance = 35;
 
-        std::string _pvpCombatStrategies = "+pvp,+boost,+dps debuff,-passive,-stay";
-        std::string _pvpNonCombatStrategies = "+pvp,+boost,-passive,-stay";
-        std::string _duelNonCombatStrategies = "+duel,+pvp,+boost,+stay,-follow,-passive,-grind";
+        // Reactive Raid Response
+        bool _reactiveEnable = true;
+        bool _reactiveAllianceEnable = true;
+        bool _reactiveHordeEnable = true;
+        uint32 _reactiveMinGroupSize = 20;
+        uint32 _reactiveMaxResponders = 40;
+        ResponderLevelMode _reactiveLevelMode = ResponderLevelMode::Raid;
+        uint8 _reactiveFixedLevel = 60;
+        uint8 _reactiveMaxLevelDifference = 5;
+        bool _reactiveLoginOfflineBots = false;
+        uint32 _reactiveLoginDelaySeconds = 20;
+        uint32 _reactiveLoginTimeoutSeconds = 60;
+        uint32 _reactiveMaxConcurrentLogins = 4;
+        uint32 _reactiveCooldownSeconds = 1800;
+        uint32 _reactiveDurationMinutes = 20;
+        float _reactiveRallyDistance = 120.0f;
+        float _reactiveLaneSpacing = 4.0f;
+        uint32 _reactiveFormationColumns = 9;
+        float _reactiveAdvanceDistance = 25.0f;
+        uint32 _lastReactiveResponse = 0;
+        uint64 _nextResponseId = 1;
+        std::vector<PendingRaidResponse> _pendingResponses;
 
+        // Population Budget
+        bool _populationBudgetEnable = true;
+        BudgetMode _budgetMode = BudgetMode::Percentage;
+        uint32 _fixedCount = 150;
+        uint32 _borrowPercent = 12;
+        uint32 _maxTotal = 150;
+        DemandMode _demandMode = DemandMode::Hybrid;
+        uint32 _baselinePercent = 20;
+        uint32 _burstGraceSeconds = 180;
+        uint32 _maxChangesPerTick = 3;
+
+        // Compatibility with City Life
+        bool _harmonyEnable = true;
+        bool _respectCityLifeReservations = true;
+        bool _excludeCityLifeAccounts = true;
+        bool _independentHookProcessing = true;
+
+        // Audit log
+        bool _auditEnable = true;
+        std::string _auditFilePath = "Logs/pvplife_audit.log";
+
+        // Active state
         uint64 _nextEventId = 1;
         std::vector<ActiveEvent> _activeEvents;
         std::vector<MoveStep> _moveQueue;
         std::vector<DuelStep> _duelQueue;
+        std::vector<EngagementStep> _engagementQueue;
         std::vector<ChatStep> _chatQueue;
         std::unordered_map<uint32, uint32> _playerChallengeCooldown;
         std::unordered_map<uint32, uint32> _botChallengeCooldown;

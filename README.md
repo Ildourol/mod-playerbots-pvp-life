@@ -1,237 +1,97 @@
-# PvP Life
+# PvP Life (Comprehensive Autonomous World PvP & Duel System)
 
-Repository/module name: `mod-playerbots-pvp-life`
+![PvP Life Banner](assets/banner.png)
 
-Created by **iCore**.
+Repository/module name: `mod-playerbots-pvp-life`  
+Created by **iCore**. Incorporates 100% of capabilities from `mod-playerbots-world-pvp`.
 
-An AzerothCore + mod-playerbots module focused on making the open world feel active through persistent, configurable bot PvP rather than isolated scripted battles.
+An AzerothCore + mod-playerbots module focused on making the open world feel alive through persistent, configurable bot PvP, world skirmishes, reactive raid defenses, and capital gate duel rituals.
 
-It is intentionally split into independent systems so each part can be enabled, tuned, or disabled without affecting the others.
+**Single Installed Module Requirement:** Users install only `mod-playerbots-pvp-life` alongside AzerothCore and `mod-playerbots`. `mod-playerbots-world-pvp` is completely unnecessary and should not be installed or enabled.
 
-### Included systems
+---
 
-- **Persistent World PvP**: keeps a configurable number of PvP hotspots active.
-- **Duel Zones**: near-continuous bot-vs-bot duel activity around configured locations such as Stormwind and Orgrimmar; idle bots are repeatedly re-paired after a cooldown.
-- **Bot -> real player duel challenges**: bots can challenge nearby real players with strict anti-spam cooldowns and a configurable level-difference check.
-- **For the Horde**: Horde bots can push into Alliance territory/capital areas while Alliance bots act as defenders.
-- **For the Alliance**: Alliance bots can push into Horde territory/capital areas while Horde bots act as defenders.
-- **Natural defender chat**: optional bot `/yell` and world-chat style reactions such as `horde in sw` or `ally in org`.
-- **Optional announcements**: server-wide scripted announcements exist for debugging/information but are disabled by default.
-- **Randomisation**: bot counts, duration, arrival timing, movement and position jitter are varied to reduce scripted-looking behaviour.
-- **Activity protection**: bots in combat, battlegrounds, instances, flight, duels, or (by default) groups are rejected.
-- **Life-module coordination**: shared bot reservations prevent conflicts with `mod-playerbots-city-life`.
-- **Small-population fallback**: activities can start with smaller teams instead of silently failing when the full random bot count is unavailable.
-- **Permanent capital duel zones**: available random bots are kept near the configured Stormwind and Orgrimmar duel points, automatically paired, healed and re-paired after duels.
-- **Return handling**: participants can be sent back to their previous location when their activity ends.
+### Key Subsystems & Features
+
+- **Persistent World PvP & Frontlines:** Keeps outdoor PvP skirmishes actively running across 35+ configured hotspots throughout Eastern Kingdoms, Kalimdor, Outland, and Northrend.
+- **Reactive Raid Defense:** Automatically detects qualifying outdoor player-led invasion raids (20+ members, PvP-flagged leader), staging an opposing faction defense force 120 yards away in 9 formation lanes at 4-yard spacing before advancing 25 yards to engage.
+- **Capital Gate Duel Arenas:** Near-continuous bot-vs-bot duel activity outside Stormwind and Orgrimmar gates. Both `mod-playerbots-pvp-life` and `mod-playerbots-city-life` run gate duels concurrently without interference.
+- **Bot-to-Player Duel Challenges:** Bots in duel arenas challenge nearby real players with configurable level-difference checks and strict anti-spam cooldowns.
+- **For the Horde & For the Alliance Campaigns:** Faction pressure pushes towards enemy capitals with organic defender yells and world chat reactions.
+- **Mutual Anti-Stealing Reservation Barrier:** Standalone-safe, thread-safe shared reservation registry (`PlayerbotsLife::ReservationRegistry`) ensuring bots borrowed by City Life are never stolen or commanded by PvP Life, and vice versa.
+- **Conservative Balanced Population Budgets:** Default borrowing budget of 12% / 150 bots max guarantees that ≥ 76% of random bots remain completely free to roam, quest, and run dungeons.
+- **Asynchronous Non-Blocking Audit Logger:** Dedicated worker thread writing to `Logs/pvplife_audit.log` tracking `MOVE`, `DUEL`, `START`, `MEMBER`, `DUEL_QUEUE`, `END`, `RETURN`, `REACTIVE_START`, and `CONFIG` events with zero world-thread blocking I/O.
+- **100% Backward-Compatible `.wpvp` GM Command Aliases:** All 14 `.wpvp` commands from the legacy world PvP module work natively as aliases within PvP Life.
+
+---
 
 ## Requirements
 
 - [`mod-playerbots/azerothcore-wotlk`, Playerbot branch](https://github.com/mod-playerbots/azerothcore-wotlk/tree/Playerbot)
 - [`mod-playerbots/mod-playerbots`, master branch](https://github.com/mod-playerbots/mod-playerbots)
-- C++17-capable build environment used by current AzerothCore.
+- C++17-capable build environment (used by AzerothCore).
+- MySQL database (AzerothCore baseline).
 
-This module is specifically designed for the Playerbot fork of AzerothCore and must be built together with `mod-playerbots`.
+---
 
-## Installation
+## Installation & Setup
 
-1. Copy/clone the folder into:
+1. Place only `mod-playerbots-pvp-life` into your `modules/` folder:
+   ```text
+   azerothcore-wotlk/modules/mod-playerbots-pvp-life
+   ```
+2. Apply the schema and seed data to your **WORLD** database:
+   ```bash
+   mysql -u root -p acore_world < data/sql/manual/world_pvp_life.sql
+   ```
+   *(If upgrading from customized legacy `playerbot_world_pvp_hotspot` data, run `data/sql/manual/import_legacy_world_pvp_hotspots.sql`).*
+3. Re-run CMake and rebuild the server. Current AzerothCore automatically discovers `mod-playerbots-pvp-life` and its `.conf.dist`.
+4. Copy `conf/mod_playerbots_pvp_life.conf.dist` to `mod_playerbots_pvp_life.conf` and adjust settings as desired.
+5. Start worldserver and look for `>> Loaded mod-playerbots-pvp-life` in your startup log.
 
-   `azerothcore-wotlk/modules/mod-playerbots-pvp-life`
+---
 
-2. Apply to the **WORLD** database:
+## Coexistence with `mod-playerbots-city-life`
 
-   `data/sql/manual/world_pvp_life.sql`
+`mod-playerbots-pvp-life` and `mod-playerbots-city-life` are architected for seamless, zero-conflict simultaneous execution:
+- **Zero Feature Suppression:** Neither module disables any feature for the other.
+- **Concurrent Capital Gate Duels:** Both modules host dueling outside city gates simultaneously. Each module pairs only its own reserved bots.
+- **Natural Hostility:** Standard core PvP hostility rules apply everywhere.
+- **Candidate Scanning Isolation:** During bot recruitment, each module verifies `!PlayerbotsLife::IsReserved(guid)` before claiming participants.
+- **Thread-Safe Shared Reservations:** `src/LifeBotReservation.h` provides atomic module flags and mutex-guarded ownership checks that resolve to the same process-wide singleton whether compiled together or standalone.
 
-3. Re-run CMake and rebuild the server. Current AzerothCore discovers the module source files and `conf/*.conf.dist` automatically. The module loader entry point is derived from the exact folder name `mod-playerbots-pvp-life`.
+---
 
-4. Copy the generated config `.dist` to a normal `.conf` if your setup does not do this automatically, then edit as required:
+## GM Commands Reference
 
-   `mod_playerbots_pvp_life.conf`
+Both `.pvplife` and `.wpvp` roots are fully supported:
 
-5. Start worldserver and check the log for `[PvPLife]`.
+### Status & Diagnostics
+- `.pvplife status` (or `.wpvp status`): Overview of active events, queues, budgets, and participant counts.
+- `.pvplife scan [minLvl] [maxLvl]` (or `.wpvp scan`): Scans online bot population, faction distribution, and hotspot readiness.
+- `.pvplife compat` (or `.wpvp compat`): Shows detected active Life modules and reservation statistics.
+- `.pvplife reservations`: Breakdown of reserved bots by owning module (`CityLife`, `PvPLife`, `Artisans`).
+- `.pvplife reload`: Reloads configuration, zone cache, and chat tables.
 
-## Main configuration
+### Reactive Defense Management
+- `.pvplife response status`: Shows pending raid responses, targets, and staging countdowns.
+- `.pvplife response stop <id|all>`: Cancels pending reactive defenses.
 
-The most important defaults are:
+### Hotspot & Event Management
+- `.pvplife start <zoneName>` (or `.wpvp start <spot>`): Force-starts a configured hotspot.
+- `.pvplife stop <id|all>` (or `.wpvp stop <id|all>`): Stops one or all active events and returns bots.
+- `.pvplife zone list` (or `.wpvp spot list`): Lists all configured hotspots.
+- `.pvplife zone create <name> <type> <attacker> <defender> <minLvl> <maxLvl>` (or `.wpvp spot create`): Creates a hotspot at current GM position.
+- `.pvplife zone rally <name>` (or `.wpvp spot rally`): Saves current GM position as attacker rally point.
+- `.pvplife zone target <name>` (or `.wpvp spot target`): Saves current GM position as defender target point.
+- `.pvplife zone counts <name> <attMin> <attMax> <defMin> <defMax>` (or `.wpvp spot counts`): Tunes participant counts.
+- `.pvplife zone duration <name> <minM> <maxM>` (or `.wpvp spot duration`): Tunes event duration.
+- `.pvplife zone enable <name> <0|1>` (or `.wpvp spot enable`): Enables or disables a hotspot.
 
-```ini
-PvPLife.Enable = 1
-PvPLife.Announce = 0
+---
 
-PvPLife.World.AlwaysActive = 1
-PvPLife.World.MinActiveHotspots = 1
-PvPLife.World.MaxActiveHotspots = 3
+## Credits & Attribution
 
-# Individual zone switches (1 = automatic activity enabled, 0 = disabled)
-PvPLife.Zone.STV_Nesingwary.Enable = 1
-PvPLife.Zone.STV_Nesingwary.MinPopulation = 10
-PvPLife.Zone.STV_Nesingwary.MaxPopulation = 20
-PvPLife.Zone.STV_Gurubashi.Enable = 1
-PvPLife.Zone.STV_Gurubashi.MinPopulation = 12
-PvPLife.Zone.STV_Gurubashi.MaxPopulation = 24
-PvPLife.Zone.DarkPortal_Azeroth.Enable = 1
-PvPLife.Zone.DarkPortal_Azeroth.MinPopulation = 12
-PvPLife.Zone.DarkPortal_Azeroth.MaxPopulation = 28
-PvPLife.Zone.Shattrath_Outskirts.Enable = 1
-PvPLife.Zone.Shattrath_Outskirts.MinPopulation = 10
-PvPLife.Zone.Shattrath_Outskirts.MaxPopulation = 24
-PvPLife.Zone.Wintergrasp.Enable = 1
-PvPLife.Zone.Wintergrasp.MinPopulation = 10
-PvPLife.Zone.Wintergrasp.MaxPopulation = 24
-
-PvPLife.Duel.Enable = 1
-PvPLife.Duel.AlwaysActive = 1
-PvPLife.Duel.GuardIntervalMs = 1000
-PvPLife.Duel.ChallengeRealPlayers = 1
-PvPLife.Duel.MaxLevelDifference = 5
-PvPLife.Duel.BotVsBotMaxLevelDifference = 5
-PvPLife.Duel.PlayerChallengeCooldownSeconds = 900
-
-PvPLife.ForTheHorde.Enable = 1
-PvPLife.ForTheAlliance.Enable = 1
-
-PvPLife.BotChat.Enable = 1
-
-PvPLife.Bots.RespectPlayerbotActivity = 0
-PvPLife.Bots.AllowPartialTeams = 1
-PvPLife.Bots.MinimumPerSide = 1
-PvPLife.Bots.MaxPerSide = 100
-```
-
-### Level check example
-
-With:
-
-```ini
-PvPLife.Duel.MaxLevelDifference = 5
-```
-
-a level 10 bot can challenge only players within level 5-15. It cannot challenge a level 80 player. Bot-vs-bot duel pairing has the same idea through the separate `BotVsBotMaxLevelDifference` setting.
-
-Duel participants are reserved from the random-playerbot teleport cycle for the duration of the
-activity. While waiting, each bot is anchored near its assigned duel position; active duel and combat
-movement is left untouched. `GuardIntervalMs` controls how frequently the waiting-position guard runs.
-
-## Database-driven zones
-
-`pvp_life_zone` stores the locations and behaviour of each activity.
-
-Every database zone can also be controlled from the config with:
-
-```ini
-PvPLife.Zone.<zone name>.Enable = 1
-PvPLife.Zone.<zone name>.MinPopulation = 10
-PvPLife.Zone.<zone name>.MaxPopulation = 60
-```
-
-`MinPopulation` and `MaxPopulation` are the total bot population of the hotspot, with both sides
-combined. For every activity the module randomly chooses a total inside this range, then divides it
-between attackers and defenders using the side ratio stored in the database. The database counts are
-also used as backward-compatible defaults when the population keys are omitted. The configured total
-is capped at two times `PvPLife.Bots.MaxPerSide`.
-
-The database `enabled` field and the config switch must both be enabled for automatic activity. A
-manual `.pvplife start <name>` command can still force-start a disabled zone for testing. New custom
-database zones use the same key pattern after a config reload. Reloading the config changes newly
-started activities; an activity already in progress keeps its current participants until it ends.
-
-Activity types:
-
-- `0` = normal World PvP skirmish
-- `1` = Duel Zone
-- `2` = For the Horde
-- `3` = For the Alliance
-
-Team values:
-
-- `0` = Alliance
-- `1` = Horde
-- `2` = Any
-
-The SQL includes starter locations for:
-
-- Stormwind duel area
-- Orgrimmar duel area
-- Stranglethorn / Nesingwary (using the custom `stvpvp` teleport)
-- Gurubashi Arena
-- Gadgetzan / Tanaris
-- Dark Portal (Azeroth)
-- Dark Portal (Outland)
-- Shattrath outskirts (using the custom `shattrathpvp` teleport)
-- K3 / Storm Peaks (using the custom `k3pvp` teleport)
-- Wintergrasp (using the custom `wintergrasppvp` teleport)
-- Horde roaming near Goldshire
-- Alliance roaming near Durotar
-- optional Orgrimmar zeppelin hotspot (disabled until tuned)
-- For the Horde -> Stormwind
-- For the Alliance -> Orgrimmar
-
-**The seed coordinates are starting points.** Use the GM position commands below to tune exact rally/target spots on your own server/navmesh.
-
-## GM commands
-
-Root command:
-
-`.pvplife`
-
-Useful commands:
-
-```text
-.pvplife status
-.pvplife start <zoneName>
-.pvplife stop all
-.pvplife stop <eventId>
-
-.pvplife zone list
-.pvplife zone create <name> <skirmish|duel|forthehorde|forthealliance> <alliance|horde|any> <alliance|horde|any> <minLevel> <maxLevel>
-.pvplife zone rally <name>
-.pvplife zone target <name>
-.pvplife zone counts <name> <attackersMin> <attackersMax> <defendersMin> <defendersMax>
-.pvplife zone duration <name> <minMinutes> <maxMinutes>
-.pvplife zone weight <name> <value>
-.pvplife zone cooldown <name> <seconds>
-.pvplife zone challenge <name> <0|1>
-.pvplife zone chat <name> <0|1>
-.pvplife zone enable <name> <0|1>
-```
-
-`zone rally` and `zone target` save the executing GM's current map and position, making coordinate tuning quick in-game.
-
-## Behaviour notes
-
-### Duel zones
-
-The duel system is meant to look like a populated PvP-server duel area, not a duel factory. Bots arrive with staggered timing and only a limited number of pairs are scheduled at once. Real-player challenges additionally require:
-
-- same faction as the duel-zone bot,
-- the player to be nearby,
-- both characters to be alive and free to duel,
-- level difference within the configured limit,
-- player and bot challenge cooldowns to be clear.
-
-### For the Horde / For the Alliance
-
-These are deliberately part of the normal world-PvP framework, with faction-specific attackers and defenders rather than a separate minigame. Server announcements are off by default; optional defender yell/world-chat messages provide the visible clue that something is happening.
-
-### City Life compatibility
-
-When a current version of `mod-playerbots-city-life` is installed, PvP Life automatically uses its
-shared in-memory bot reservation registry, so the two modules never select the same bot. The
-integration uses only public module code; no compatibility patch or terminal command is required.
-
-## Test priorities
-
-For the first live-server test, verify in this order:
-
-1. module loads and WORLD tables are detected;
-2. `.pvplife status` works;
-3. force-start `StormwindDuel` / `OrgrimmarDuel`;
-4. verify bot-vs-bot duel requests;
-5. verify real-player challenge level check and cooldown;
-6. test normal hotspots, including the new `Wintergrasp` zone;
-7. force-start `ForTheHorde_Stormwind` and `ForTheAlliance_Orgrimmar`;
-8. tune rally/target coordinates and bot counts from actual server behaviour.
-
-## Status
-
-Active — working PvP Life implementation with configurable world PvP and persistent duel zones.
+- **PvP Life Core & Architecture:** Created by **iCore**.
+- **World PvP Hotspot Seeds & Reactive Defense Logic:** Ported and consolidated from `mod-playerbots-world-pvp`.
+- **Cross-Module Reservation Protocol:** Designed for the Playerbots Life ecosystem (`mod-playerbots-city-life`, `mod-playerbots-pvp-life`, `mod-playerbots-artisans`).

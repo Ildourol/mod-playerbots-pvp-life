@@ -5,6 +5,7 @@
  */
 
 #include "PvPLifeMgr.h"
+#include "LifeBotReservation.h"
 
 #include "Chat.h"
 #include "CommandScript.h"
@@ -17,7 +18,7 @@ class PvPLifeWorldScript : public WorldScript
 {
 public:
     PvPLifeWorldScript()
-        : WorldScript("PvPLifeWorldScript", { WORLDHOOK_ON_AFTER_CONFIG_LOAD, WORLDHOOK_ON_UPDATE })
+        : WorldScript("PvPLifeWorldScript", { WORLDHOOK_ON_AFTER_CONFIG_LOAD, WORLDHOOK_ON_UPDATE, WORLDHOOK_ON_SHUTDOWN })
     {
     }
 
@@ -30,6 +31,12 @@ public:
     {
         sPvPLifeMgr.Update(diff);
     }
+
+    void OnShutdown() override
+    {
+        sPvPLifeMgr.Shutdown();
+        PlayerbotsLife::UnregisterActiveModule(PlayerbotsLife::MODULE_PVP_LIFE);
+    }
 };
 
 class PvPLifeCommandScript : public CommandScript
@@ -41,7 +48,8 @@ public:
     {
         static ChatCommandTable commandTable =
         {
-            { "pvplife", HandlePvPLifeCommand, SEC_GAMEMASTER, Console::Yes }
+            { "pvplife", HandlePvPLifeCommand, SEC_GAMEMASTER,    Console::Yes },
+            { "wpvp",    HandleWpvpCommand,    SEC_ADMINISTRATOR, Console::Yes }
         };
         return commandTable;
     }
@@ -50,10 +58,16 @@ public:
     {
         return sPvPLifeMgr.HandleCommand(handler, args ? args : "");
     }
+
+    static bool HandleWpvpCommand(ChatHandler* handler, char const* args)
+    {
+        return sPvPLifeMgr.HandleWpvpCommand(handler, args ? args : "");
+    }
 };
 
 void AddPvPLifeScripts()
 {
+    PlayerbotsLife::RegisterActiveModule(PlayerbotsLife::MODULE_PVP_LIFE);
     new PvPLifeWorldScript();
     new PvPLifeCommandScript();
     LOG_INFO("server.loading", ">> Loaded mod-playerbots-pvp-life");

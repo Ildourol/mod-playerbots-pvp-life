@@ -34,6 +34,37 @@ namespace PvPLife
         World = 1
     };
 
+    enum class BudgetMode : uint8
+    {
+        Fixed = 0,
+        Percentage = 1
+    };
+
+    enum class DemandMode : uint8
+    {
+        Fixed = 0,
+        Dynamic = 1,
+        Hybrid = 2
+    };
+
+    enum class EventOrigin : uint8
+    {
+        Zone = 0,
+        ReactiveRaidResponse = 1
+    };
+
+    enum class ResponderLevelMode : uint8
+    {
+        Raid = 0,
+        Fixed = 1
+    };
+
+    enum class AccountFilterMode : uint8
+    {
+        LegacyAny = 0,
+        All = 1
+    };
+
     struct Zone
     {
         uint32 Id = 0;
@@ -77,6 +108,7 @@ namespace PvPLife
         uint8 Race = 0;
         uint8 Class = 0;
         TeamSide Team = TeamSide::Any;
+        bool Online = true;
     };
 
     struct Participant
@@ -98,6 +130,8 @@ namespace PvPLife
     {
         uint64 EventId = 0;
         Zone EventZone;
+        EventOrigin Origin = EventOrigin::Zone;
+        uint32 TriggerGuidLow = 0;
         uint32 StartedAt = 0;
         uint32 EndsAt = 0;
         std::vector<Participant> Members;
@@ -107,6 +141,7 @@ namespace PvPLife
     {
         uint64 EventId = 0;
         uint32 GuidLow = 0;
+        std::string Name;
         uint32 ExecuteAt = 0;
         uint32 MapId = 0;
         float X = 0.0f;
@@ -121,6 +156,8 @@ namespace PvPLife
         uint64 EventId = 0;
         uint32 ChallengerGuidLow = 0;
         uint32 TargetGuidLow = 0;
+        std::string ChallengerName;
+        std::string TargetName;
         uint32 ExecuteAt = 0;
         uint8 RetryCount = 0;
         bool TargetIsRealPlayer = false;
@@ -135,6 +172,33 @@ namespace PvPLife
         uint32 ExecuteAt = 0;
         ChatChannel Channel = ChatChannel::Yell;
         std::string Text;
+    };
+
+    struct PendingRaidResponse
+    {
+        uint64 ResponseId = 0;
+        uint32 TriggerGuidLow = 0;
+        TeamSide ResponseTeam = TeamSide::Any;
+        uint32 MapId = 0;
+        float TargetX = 0.0f;
+        float TargetY = 0.0f;
+        float TargetZ = 0.0f;
+        float TargetO = 0.0f;
+        uint32 StartAt = 0;
+        uint32 Deadline = 0;
+        std::vector<BotCandidate> Bots;
+        std::vector<uint32> PendingLoginGuids;
+        bool Cancelled = false;
+    };
+
+    struct EngagementStep
+    {
+        uint64 EventId = 0;
+        uint32 BotGuidLow = 0;
+        uint32 TargetGuidLow = 0;
+        uint32 ExecuteAt = 0;
+        uint8 RetryCount = 0;
+        uint8 MaxRetries = 12;
     };
 }
 
