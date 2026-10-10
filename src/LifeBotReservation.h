@@ -273,7 +273,7 @@ namespace PlayerbotsLife
 
         // Search lattice candidates around reqX, reqY in 20-yard increments
         constexpr float SlotSpacing = 20.0f;
-        constexpr float MinSeparation = 18.0f;
+        constexpr float MinSeparation = 20.0f;
         int maxRings = static_cast<int>(maxRadius / SlotSpacing) + 1;
 
         for (int ring = 0; ring <= maxRings; ++ring)
@@ -296,9 +296,10 @@ namespace PlayerbotsLife
                     {
                         if (existing.MapId != mapId)
                             continue;
+                        float dz = std::abs(existing.CenterZ - reqZ);
                         float d = std::sqrt((existing.CenterX - candX) * (existing.CenterX - candX) +
                                             (existing.CenterY - candY) * (existing.CenterY - candY));
-                        if (d < MinSeparation)
+                        if (d < MinSeparation && dz <= 6.0f)
                         {
                             collides = true;
                             break;
@@ -327,7 +328,25 @@ namespace PlayerbotsLife
         return false;
     }
 
-    inline void ReleaseDuelStagingSlot(std::uint64_t activityId)
+    inline void ReleaseDuelStagingSlot(std::uint32_t slotId)
+    {
+        if (slotId == 0)
+            return;
+
+        ReservationRegistry& registry = GetReservationRegistry();
+        std::lock_guard<std::mutex> lock(registry.Mutex);
+
+        auto& slots = registry.ActiveDuelSlots;
+        for (auto it = slots.begin(); it != slots.end();)
+        {
+            if (it->SlotId == slotId)
+                it = slots.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    inline void ReleaseDuelStagingSlotByActivity(std::uint64_t activityId)
     {
         if (activityId == 0)
             return;
@@ -345,11 +364,29 @@ namespace PlayerbotsLife
         }
     }
 
+    inline void ReleaseDuelStagingSlot(std::uint64_t activityId)
+    {
+        if (activityId == 0)
+            return;
+
+        ReservationRegistry& registry = GetReservationRegistry();
+        std::lock_guard<std::mutex> lock(registry.Mutex);
+
+        auto& slots = registry.ActiveDuelSlots;
+        for (auto it = slots.begin(); it != slots.end();)
+        {
+            if (it->ActivityId == activityId || it->SlotId == static_cast<std::uint32_t>(activityId))
+                it = slots.erase(it);
+            else
+                ++it;
+        }
+    }
+
     // -------------------------------------------------------------
     // Shared Real Player Challenge Cooldown Ledger
     // -------------------------------------------------------------
 
-    inline bool CanChallengeRealPlayer(std::uint32_t playerGuidLow, std::uint32_t nowSec, std::uint32_t cooldownSec)
+    inline bool CanChallengeRealPlayer(std::uint32_t playerGuidLow, std::uint32_t nowSec, std::uint32_t cooldownSec = 0)
     {
         (void)cooldownSec;
         ReservationRegistry& registry = GetReservationRegistry();
@@ -366,6 +403,18 @@ namespace PlayerbotsLife
         ReservationRegistry& registry = GetReservationRegistry();
         std::lock_guard<std::mutex> lock(registry.Mutex);
         registry.RealPlayerCooldowns[playerGuidLow] = nowSec + cooldownSec;
+    }
+
+    // -------------------------------------------------------------
+    // Fair Admission Round Arbitration
+    // -------------------------------------------------------------
+
+    inline ReservationOwner GetNextContestedPriorityOwner()
+    {
+        ReservationRegistry& registry = GetReservationRegistry();
+        std::lock_guard<std::mutex> lock(registry.Mutex);
+        ++registry.AdmissionRoundCounter;
+        return (registry.AdmissionRoundCounter % 2 == 0) ? ReservationOwner::CityLife : ReservationOwner::PvPLife;
     }
 
     // -------------------------------------------------------------

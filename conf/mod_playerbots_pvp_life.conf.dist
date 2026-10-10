@@ -430,12 +430,23 @@ PvPLife.Population.Enable = 1
 PvPLife.Population.BudgetMode = "percentage"
 PvPLife.Population.FixedCount = 100
 PvPLife.Population.BorrowPercent = 10
+
+# Global ceiling across all PvP activities combined.
+# Set to 0 for uncapped dynamic mode (budget scales purely with live world bots * BorrowPercent).
+# Tuned conservatively to 120 max total bots across all activities on a 1,000-bot server.
 PvPLife.Population.MaxTotal = 120
 
 PvPLife.Population.DemandMode = "hybrid"
 PvPLife.Population.BaselinePercent = 20
 PvPLife.Population.BurstGraceSeconds = 180
 PvPLife.Population.MaxChangesPerTick = 3
+
+# Proportional Zone & Skirmish Scaling:
+# When enabled (1), zone min/max bot populations dynamically scale up or down based on
+# live active world bots relative to 1,000-bot baseline (2v2 skirmishes at low population,
+# expanding into full-scale 10v10+ battles during high server population).
+# Default: 1 (Enabled)
+PvPLife.Population.ProportionalZoneScaling = 1
 
 ###################################################################################################
 # Cross-Module Harmony & Coexistence with mod-playerbots-city-life

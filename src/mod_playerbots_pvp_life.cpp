@@ -42,45 +42,50 @@ public:
     }
 };
 
+#include "Group.h"
+#include "GroupScript.h"
+
 class PvPLifePlayerScript : public PlayerScript
 {
 public:
     PvPLifePlayerScript()
-        : PlayerScript("PvPLifePlayerScript", {
-            PLAYERHOOK_ON_LOGOUT,
-            PLAYERHOOK_CAN_GROUP_INVITE,
-            PLAYERHOOK_CAN_GROUP_ACCEPT
-        })
+        : PlayerScript("PvPLifePlayerScript", { PLAYERHOOK_ON_LOGOUT })
     {
     }
 
     void OnPlayerLogout(Player* player) override
     {
         if (player)
-            sPvPLifeMgr.DisengageParticipant(player->GetGUID().GetCounter());
+            sPvPLifeMgr.OnPlayerLogout(player->GetGUID().GetCounter());
+    }
+};
+
+class PvPLifeGroupScript : public GroupScript
+{
+public:
+    PvPLifeGroupScript()
+        : GroupScript("PvPLifeGroupScript", { GROUPSCRIPT_ON_ADD_MEMBER })
+    {
     }
 
-    bool OnPlayerCanGroupInvite(Player* /*player*/, std::string& membername) override
+    void OnAddMember(Group* group, ObjectGuid guid) override
     {
-        if (Player* invited = ObjectAccessor::FindPlayerByName(membername))
+        if (!group)
+            return;
+
+        bool hasRealPlayer = false;
+        for (GroupReference const* ref = group->GetFirstMember(); ref != nullptr; ref = ref->next())
         {
-            if (invited->GetSession() && invited->GetSession()->IsBot())
+            Player const* member = ref->GetSource();
+            if (member && member->GetSession() && !member->GetSession()->IsBot())
             {
-                if (sPvPLifeMgr.IsParticipant(invited->GetGUID().GetCounter()))
-                    sPvPLifeMgr.DisengageParticipant(invited->GetGUID().GetCounter());
+                hasRealPlayer = true;
+                break;
             }
         }
-        return true;
-    }
 
-    bool OnPlayerCanGroupAccept(Player* player, Group* /*group*/) override
-    {
-        if (player && player->GetSession() && player->GetSession()->IsBot())
-        {
-            if (sPvPLifeMgr.IsParticipant(player->GetGUID().GetCounter()))
-                sPvPLifeMgr.DisengageParticipant(player->GetGUID().GetCounter());
-        }
-        return true;
+        if (hasRealPlayer)
+            sPvPLifeMgr.OnAddGroupMember(guid.GetCounter());
     }
 };
 
@@ -115,6 +120,7 @@ void AddPvPLifeScripts()
     PlayerbotsLife::RegisterActiveModule(PlayerbotsLife::MODULE_PVP_LIFE);
     new PvPLifeWorldScript();
     new PvPLifePlayerScript();
+    new PvPLifeGroupScript();
     new PvPLifeCommandScript();
     LOG_INFO("server.loading", ">> Loaded mod-playerbots-pvp-life");
 }

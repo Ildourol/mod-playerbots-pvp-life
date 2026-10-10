@@ -30,6 +30,12 @@ namespace PvPLife
         bool HandleCommand(ChatHandler* handler, std::string const& text);
         bool HandleWpvpCommand(ChatHandler* handler, std::string const& text);
 
+        // Public Hook & Participant Interface
+        bool IsParticipant(uint32 guidLow) const;
+        void DisengageParticipant(uint32 guidLow);
+        void OnPlayerLogout(uint32 guidLow);
+        void OnAddGroupMember(uint32 guidLow);
+
     private:
         Manager() = default;
 
@@ -44,7 +50,7 @@ namespace PvPLife
         std::string ZoneSelectSql(std::string const& suffix = "") const;
 
         std::vector<BotCandidate> LoadCandidates(TeamSide team, uint8 minLevel, uint8 maxLevel,
-            std::unordered_set<uint32> const& excluded);
+            std::unordered_set<uint32> const& excluded, uint32 deficit = 0);
         std::vector<BotCandidate> LoadOfflineCandidates(TeamSide team, uint8 level,
             std::unordered_set<uint32> const& excluded);
         Player* FindPlayer(uint32 guidLow) const;
@@ -52,8 +58,6 @@ namespace PvPLife
         bool IsConfiguredBotAccount(uint32 accountId);
         bool IsSafeBot(Player* player, bool allowPvPLifeReservation = false) const;
         bool IsRealPlayer(Player* player) const;
-        bool IsParticipant(uint32 guidLow) const;
-        void DisengageParticipant(uint32 guidLow);
         uint8 EffectiveMinLevel(uint8 minLevel) const;
 
         bool StartZone(Zone const& zone, ChatHandler* handler = nullptr, bool forced = false);
@@ -90,6 +94,7 @@ namespace PvPLife
         void MoveBot(Player* player, uint32 mapId, float x, float y, float z, float o, bool teleport) const;
         void EngageTarget(Player* bot, Player* target);
         float Jitter() const;
+        uint32 GetLiveWorldBotCount() const;
         uint32 CalculatePopulationBudget() const;
         void CalculatePopulation(Zone const& zone, uint32& attackerCount, uint32& defenderCount) const;
         uint32 RandomCount(uint32 minCount, uint32 maxCount) const;
@@ -226,6 +231,7 @@ namespace PvPLife
         uint32 _baselinePercent = 20;
         uint32 _burstGraceSeconds = 180;
         uint32 _maxChangesPerTick = 3;
+        bool _proportionalZoneScaling = true;
 
         // Compatibility with City Life
         bool _harmonyEnable = true;
