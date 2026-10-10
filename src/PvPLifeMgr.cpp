@@ -203,7 +203,7 @@ namespace PvPLife
         std::string filterModeStr = Lower(sConfigMgr->GetOption<std::string>("PvPLife.Bots.AccountFilterMode", "legacy_any"));
         _accountFilterMode = (filterModeStr == "all") ? AccountFilterMode::All : AccountFilterMode::LegacyAny;
 
-        _botQueryLimit = std::max<uint32>(50, sConfigMgr->GetOption<uint32>("PvPLife.Bots.QueryLimit", 500));
+        _botQueryLimit = std::max<uint32>(50, sConfigMgr->GetOption<uint32>("PvPLife.Bots.QueryLimit", 1000));
         _minOnlineRequired = sConfigMgr->GetOption<uint32>("PvPLife.Bots.MinOnlineRequired", 3);
         _globalMinLevel = static_cast<uint8>(std::clamp<uint32>(sConfigMgr->GetOption<uint32>("PvPLife.Bots.GlobalMinLevel", 20), 1, 80));
 
@@ -275,7 +275,7 @@ namespace PvPLife
         _reactiveAllianceEnable = sConfigMgr->GetOption<bool>("PvPLife.ReactiveRaidResponse.AllianceEnable", true);
         _reactiveHordeEnable = sConfigMgr->GetOption<bool>("PvPLife.ReactiveRaidResponse.HordeEnable", true);
         _reactiveMinGroupSize = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("PvPLife.ReactiveRaidResponse.MinGroupSize", 20), 2, 40);
-        _reactiveMaxResponders = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("PvPLife.ReactiveRaidResponse.MaxResponders", 40), 1, 40);
+        _reactiveMaxResponders = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("PvPLife.ReactiveRaidResponse.MaxResponders", 30), 1, 40);
         std::string lvlModeStr = Lower(sConfigMgr->GetOption<std::string>("PvPLife.ReactiveRaidResponse.LevelMode", "raid"));
         _reactiveLevelMode = (lvlModeStr == "fixed") ? ResponderLevelMode::Fixed : ResponderLevelMode::Raid;
         _reactiveFixedLevel = static_cast<uint8>(std::clamp<uint32>(sConfigMgr->GetOption<uint32>("PvPLife.ReactiveRaidResponse.FixedLevel", 60), 1, 80));
@@ -296,7 +296,7 @@ namespace PvPLife
         _populationBudgetEnable = sConfigMgr->GetOption<bool>("PvPLife.Population.Enable", true);
         std::string budgetModeStr = Lower(sConfigMgr->GetOption<std::string>("PvPLife.Population.BudgetMode", "percentage"));
         _budgetMode = (budgetModeStr == "fixed") ? BudgetMode::Fixed : BudgetMode::Percentage;
-        _fixedCount = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("PvPLife.Population.FixedCount", 150), 2, 500);
+        _fixedCount = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("PvPLife.Population.FixedCount", 120), 2, 500);
         _borrowPercent = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("PvPLife.Population.BorrowPercent", 12), 1, 100);
         _maxTotal = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("PvPLife.Population.MaxTotal", 150), 2, 1000);
         std::string demandModeStr = Lower(sConfigMgr->GetOption<std::string>("PvPLife.Population.DemandMode", "hybrid"));
@@ -306,9 +306,9 @@ namespace PvPLife
             _demandMode = DemandMode::Dynamic;
         else
             _demandMode = DemandMode::Hybrid;
-        _baselinePercent = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("PvPLife.Population.BaselinePercent", 20), 1, 100);
+        _baselinePercent = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("PvPLife.Population.BaselinePercent", 25), 1, 100);
         _burstGraceSeconds = sConfigMgr->GetOption<uint32>("PvPLife.Population.BurstGraceSeconds", 180);
-        _maxChangesPerTick = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("PvPLife.Population.MaxChangesPerTick", 3), 1, 20);
+        _maxChangesPerTick = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("PvPLife.Population.MaxChangesPerTick", 4), 1, 20);
 
         // 9. Compatibility & Anti-Stealing Barrier
         _harmonyEnable = sConfigMgr->GetOption<bool>("PvPLife.Compatibility.CityLife.EnableHarmony", true);
