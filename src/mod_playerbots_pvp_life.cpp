@@ -9,6 +9,9 @@
 
 #include "Chat.h"
 #include "CommandScript.h"
+#include "ObjectAccessor.h"
+#include "Player.h"
+#include "PlayerScript.h"
 #include "ScriptMgr.h"
 #include "WorldScript.h"
 
@@ -36,6 +39,48 @@ public:
     {
         sPvPLifeMgr.Shutdown();
         PlayerbotsLife::UnregisterActiveModule(PlayerbotsLife::MODULE_PVP_LIFE);
+    }
+};
+
+class PvPLifePlayerScript : public PlayerScript
+{
+public:
+    PvPLifePlayerScript()
+        : PlayerScript("PvPLifePlayerScript", {
+            PLAYERHOOK_ON_LOGOUT,
+            PLAYERHOOK_CAN_GROUP_INVITE,
+            PLAYERHOOK_CAN_GROUP_ACCEPT
+        })
+    {
+    }
+
+    void OnPlayerLogout(Player* player) override
+    {
+        if (player)
+            sPvPLifeMgr.DisengageParticipant(player->GetGUID().GetCounter());
+    }
+
+    bool OnPlayerCanGroupInvite(Player* /*player*/, std::string& membername) override
+    {
+        if (Player* invited = ObjectAccessor::FindPlayerByName(membername))
+        {
+            if (invited->GetSession() && invited->GetSession()->IsBot())
+            {
+                if (sPvPLifeMgr.IsParticipant(invited->GetGUID().GetCounter()))
+                    sPvPLifeMgr.DisengageParticipant(invited->GetGUID().GetCounter());
+            }
+        }
+        return true;
+    }
+
+    bool OnPlayerCanGroupAccept(Player* player, Group* /*group*/) override
+    {
+        if (player && player->GetSession() && player->GetSession()->IsBot())
+        {
+            if (sPvPLifeMgr.IsParticipant(player->GetGUID().GetCounter()))
+                sPvPLifeMgr.DisengageParticipant(player->GetGUID().GetCounter());
+        }
+        return true;
     }
 };
 
@@ -69,6 +114,7 @@ void AddPvPLifeScripts()
 {
     PlayerbotsLife::RegisterActiveModule(PlayerbotsLife::MODULE_PVP_LIFE);
     new PvPLifeWorldScript();
+    new PvPLifePlayerScript();
     new PvPLifeCommandScript();
     LOG_INFO("server.loading", ">> Loaded mod-playerbots-pvp-life");
 }

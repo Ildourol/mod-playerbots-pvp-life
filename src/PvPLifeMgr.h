@@ -50,9 +50,10 @@ namespace PvPLife
         Player* FindPlayer(uint32 guidLow) const;
         TeamSide TeamForRace(uint8 race) const;
         bool IsConfiguredBotAccount(uint32 accountId);
-        bool IsSafeBot(Player* player) const;
+        bool IsSafeBot(Player* player, bool allowPvPLifeReservation = false) const;
         bool IsRealPlayer(Player* player) const;
         bool IsParticipant(uint32 guidLow) const;
+        void DisengageParticipant(uint32 guidLow);
         uint8 EffectiveMinLevel(uint8 minLevel) const;
 
         bool StartZone(Zone const& zone, ChatHandler* handler = nullptr, bool forced = false);

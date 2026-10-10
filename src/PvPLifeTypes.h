@@ -8,6 +8,7 @@
 #define PVP_LIFE_TYPES_H
 
 #include "Define.h"
+#include "LifeBotReservation.h"
 #include <string>
 #include <vector>
 
@@ -109,6 +110,7 @@ namespace PvPLife
         uint8 Class = 0;
         TeamSide Team = TeamSide::Any;
         bool Online = true;
+        PlayerbotsLife::LeaseToken Token;
     };
 
     struct Participant
@@ -124,6 +126,8 @@ namespace PvPLife
         float ActivityY = 0.0f;
         float ActivityZ = 0.0f;
         float ActivityO = 0.0f;
+        PlayerbotsLife::LeaseToken Token;
+        uint32 DuelStagingSlotId = 0;
     };
 
     struct ActiveEvent
@@ -149,6 +153,7 @@ namespace PvPLife
         float Z = 0.0f;
         float O = 0.0f;
         bool Teleport = false;
+        uint8 RetryCount = 0;
     };
 
     struct DuelStep

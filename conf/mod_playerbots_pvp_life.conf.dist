@@ -347,9 +347,9 @@ PvPLife.FactionCampaign.GlobalCooldownSeconds = 3600
 # Natural Bot Chatter
 ###################################################################################################
 
-PvPLife.BotChat.Enable = 1
-PvPLife.BotChat.YellChance = 70
-PvPLife.BotChat.WorldChance = 35
+PvPLife.BotChat.Enable = 0
+PvPLife.BotChat.YellChance = 0
+PvPLife.BotChat.WorldChance = 0
 
 ###################################################################################################
 # Reactive Raid Defense

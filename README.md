@@ -20,6 +20,11 @@ An AzerothCore + mod-playerbots module focused on making the open world feel ali
 - **For the Horde & For the Alliance Campaigns:** Faction pressure pushes towards enemy capitals with organic defender yells and world chat reactions.
 - **Mutual Anti-Stealing Reservation Barrier:** Standalone-safe, thread-safe shared reservation registry (`PlayerbotsLife::ReservationRegistry`) ensuring bots borrowed by City Life are never stolen or commanded by PvP Life, and vice versa.
 - **Conservative Balanced Population Budgets:** Default borrowing budget of 12% / 150 bots max guarantees that ≥ 76% of random bots remain completely free to roam, quest, and run dungeons.
+- **Zero Bot Tampering Invariant:** Bots are borrowed strictly AS-IS from the natural Playerbot pool with zero artificial level boosts, zero talent changes, and zero stat inflation.
+- **Zero GM Spam Protection:** Game Masters and administrators are strictly exempt from unsolicited duel challenges, yells, or world announcements.
+- **Silent-by-Default Chatter & Announcements:** All automated bot chatter, yells, and server-wide announcements default to OFF (`0`) in config for a clean, natural player atmosphere.
+- **Instant Disengagement on Invite or Logout:** Combatants and duelers immediately drop PvP Life activities if invited to a player group or logged out.
+- **Shared Duel Staging Lattice (20yd Spacing):** Prevents duel area collisions outside Stormwind and Orgrimmar gates when running concurrently with `mod-playerbots-city-life`.
 - **Asynchronous Non-Blocking Audit Logger:** Dedicated worker thread writing to `Logs/pvplife_audit.log` tracking `MOVE`, `DUEL`, `START`, `MEMBER`, `DUEL_QUEUE`, `END`, `RETURN`, `REACTIVE_START`, and `CONFIG` events with zero world-thread blocking I/O.
 - **100% Backward-Compatible `.wpvp` GM Command Aliases:** All 14 `.wpvp` commands from the legacy world PvP module work natively as aliases within PvP Life.
 
