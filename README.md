@@ -19,7 +19,7 @@ An AzerothCore + mod-playerbots module focused on making the open world feel ali
 - **Bot-to-Player Duel Challenges:** Bots in duel arenas challenge nearby real players with configurable level-difference checks and strict anti-spam cooldowns.
 - **For the Horde & For the Alliance Campaigns:** Faction pressure pushes towards enemy capitals with organic defender yells and world chat reactions.
 - **Mutual Anti-Stealing Reservation Barrier:** Standalone-safe, thread-safe shared reservation registry (`PlayerbotsLife::ReservationRegistry`) ensuring bots borrowed by City Life are never stolen or commanded by PvP Life, and vice versa.
-- **Conservative Balanced Population Budgets:** Default borrowing budget of 12% / 150 bots max guarantees that ≥ 76% of random bots remain completely free to roam, quest, and run dungeons.
+- **Conservative Balanced Population Budgets:** Default borrowing budget of 10% / 120 bots max (configured for a 1,000-bot server) guarantees that ≥ 80% (800+ bots) of random bots remain completely free to roam, quest, level, and run dungeons.
 - **Zero Bot Tampering Invariant:** Bots are borrowed strictly AS-IS from the natural Playerbot pool with zero artificial level boosts, zero talent changes, and zero stat inflation.
 - **Zero GM Spam Protection:** Game Masters and administrators are strictly exempt from unsolicited duel challenges, yells, or world announcements.
 - **Silent-by-Default Chatter & Announcements:** All automated bot chatter, yells, and server-wide announcements default to OFF (`0`) in config for a clean, natural player atmosphere.

@@ -189,16 +189,16 @@ namespace PvPLife
         uint32 _factionCampaignChance = 12;
         uint32 _factionCampaignGlobalCooldown = 3600;
         uint32 _lastFactionCampaign = 0;
-        bool _botChatEnable = true;
-        uint32 _botChatYellChance = 70;
-        uint32 _botChatWorldChance = 35;
+        bool _botChatEnable = false;
+        uint32 _botChatYellChance = 0;
+        uint32 _botChatWorldChance = 0;
 
         // Reactive Raid Response
         bool _reactiveEnable = true;
         bool _reactiveAllianceEnable = true;
         bool _reactiveHordeEnable = true;
         uint32 _reactiveMinGroupSize = 20;
-        uint32 _reactiveMaxResponders = 40;
+        uint32 _reactiveMaxResponders = 25;
         ResponderLevelMode _reactiveLevelMode = ResponderLevelMode::Raid;
         uint8 _reactiveFixedLevel = 60;
         uint8 _reactiveMaxLevelDifference = 5;
@@ -219,9 +219,9 @@ namespace PvPLife
         // Population Budget
         bool _populationBudgetEnable = true;
         BudgetMode _budgetMode = BudgetMode::Percentage;
-        uint32 _fixedCount = 150;
-        uint32 _borrowPercent = 12;
-        uint32 _maxTotal = 150;
+        uint32 _fixedCount = 100;
+        uint32 _borrowPercent = 10;
+        uint32 _maxTotal = 120;
         DemandMode _demandMode = DemandMode::Hybrid;
         uint32 _baselinePercent = 20;
         uint32 _burstGraceSeconds = 180;
