@@ -1,5 +1,7 @@
 # PvP Life (Comprehensive Autonomous World PvP & Duel System)
 
+![PvP Life Banner](assets/banner.png)
+
 Repository/module name: `mod-playerbots-pvp-life`  
 Created by **iCore**. Incorporates 100% of capabilities from `mod-playerbots-world-pvp`.
 
