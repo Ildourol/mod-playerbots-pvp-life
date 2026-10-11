@@ -62,7 +62,8 @@ PvPLife.Bots.RequireBotEligibility = 1
 
 #
 #   PvPLife.Bots.UsePlayerbotConfig
-#       Description: Import account prefix and login delay settings from mod-playerbots.
+#       Description: Import account prefix and login delay settings from Playerbots configuration
+#                    (checks modern Playerbots.* keys first with fallback to legacy AiPlayerbot.*).
 #       Default:     1 (Enabled)
 #
 PvPLife.Bots.UsePlayerbotConfig = 1
@@ -94,7 +95,8 @@ PvPLife.Bots.AccountFilterMode = "legacy_any"
 #
 #   PvPLife.Bots.QueryLimit
 #       Description: Maximum number of character candidates queried during candidate evaluation.
-#                    Tuned to 500 for conservative fair selection across active bots.
+#                    Set to 0 for dynamic automatic scaling based on live online bot counts (clamped 100-1500).
+#                    Fixed values are clamped between 50 and 5000.
 #       Default:     500
 #
 PvPLife.Bots.QueryLimit = 500

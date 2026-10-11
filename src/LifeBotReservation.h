@@ -12,10 +12,13 @@
 #include <cstdint>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace PlayerbotsLife
 {
+    constexpr std::uint32_t LIFE_BOT_RESERVATION_PROTOCOL_VERSION = 2026101101;
+
     enum class ReservationOwner : std::uint8_t
     {
         CityLife = 0,
@@ -35,7 +38,8 @@ namespace PlayerbotsLife
     {
         Provisional = 0,
         Active      = 1,
-        Releasing   = 2
+        Releasing   = 2,
+        Released    = 3
     };
 
     struct LeaseToken
@@ -55,6 +59,7 @@ namespace PlayerbotsLife
         float CenterY = 0.0f;
         float CenterZ = 0.0f;
         std::uint64_t ActivityId = 0;
+        std::uint64_t PairId = 0;
         ReservationOwner Owner = ReservationOwner::CityLife;
         std::uint32_t ExpiryTimeMs = 0;
     };
@@ -142,6 +147,16 @@ namespace PlayerbotsLife
     inline bool TryAcquireBatch(std::vector<LeaseToken>& outTokens, std::vector<std::uint32_t> const& guids,
                                 ReservationOwner owner, std::uint64_t activityId)
     {
+        if (guids.empty())
+        {
+            outTokens.clear();
+            return true;
+        }
+
+        std::unordered_set<std::uint32_t> uniqueGuids(guids.begin(), guids.end());
+        if (uniqueGuids.size() != guids.size())
+            return false;
+
         ReservationRegistry& registry = GetReservationRegistry();
         std::lock_guard<std::mutex> lock(registry.Mutex);
 
@@ -186,7 +201,27 @@ namespace PlayerbotsLife
         return (current.Owner == token.Owner &&
                 current.Generation == token.Generation &&
                 current.ActivityId == token.ActivityId &&
-                current.State != LeaseState::Releasing);
+                current.State != LeaseState::Releasing &&
+                current.State != LeaseState::Released);
+    }
+
+    inline bool ValidateActiveLease(LeaseToken const& token)
+    {
+        if (token.GuidLow == 0 || token.Generation == 0)
+            return false;
+
+        ReservationRegistry& registry = GetReservationRegistry();
+        std::lock_guard<std::mutex> lock(registry.Mutex);
+
+        auto it = registry.Leases.find(token.GuidLow);
+        if (it == registry.Leases.end())
+            return false;
+
+        LeaseToken const& current = it->second;
+        return (current.Owner == token.Owner &&
+                current.Generation == token.Generation &&
+                current.ActivityId == token.ActivityId &&
+                current.State == LeaseState::Active);
     }
 
     inline void BeginRelease(LeaseToken const& token)
@@ -256,7 +291,8 @@ namespace PlayerbotsLife
 
     inline bool ClaimDuelStagingSlot(std::uint32_t mapId, float reqX, float reqY, float reqZ,
                                      float maxRadius, std::uint64_t activityId, ReservationOwner owner,
-                                     std::uint32_t nowMs, std::uint32_t durationMs, DuelStagingSlot& outSlot)
+                                     std::uint32_t nowMs, std::uint32_t durationMs, DuelStagingSlot& outSlot,
+                                     std::uint64_t pairId = 0)
     {
         ReservationRegistry& registry = GetReservationRegistry();
         std::lock_guard<std::mutex> lock(registry.Mutex);
@@ -315,6 +351,7 @@ namespace PlayerbotsLife
                         slot.CenterY = candY;
                         slot.CenterZ = reqZ;
                         slot.ActivityId = activityId;
+                        slot.PairId = pairId;
                         slot.Owner = owner;
                         slot.ExpiryTimeMs = nowMs + durationMs;
 
@@ -346,9 +383,9 @@ namespace PlayerbotsLife
         }
     }
 
-    inline void ReleaseDuelStagingSlotByActivity(std::uint64_t activityId)
+    inline void ReleaseDuelStagingSlot(std::uint32_t slotId, ReservationOwner owner)
     {
-        if (activityId == 0)
+        if (slotId == 0)
             return;
 
         ReservationRegistry& registry = GetReservationRegistry();
@@ -357,14 +394,32 @@ namespace PlayerbotsLife
         auto& slots = registry.ActiveDuelSlots;
         for (auto it = slots.begin(); it != slots.end();)
         {
-            if (it->ActivityId == activityId)
+            if (it->SlotId == slotId && it->Owner == owner)
                 it = slots.erase(it);
             else
                 ++it;
         }
     }
 
-    inline void ReleaseDuelStagingSlot(std::uint64_t activityId)
+    inline void ReleaseDuelStagingSlotByPair(std::uint64_t pairId, ReservationOwner owner)
+    {
+        if (pairId == 0)
+            return;
+
+        ReservationRegistry& registry = GetReservationRegistry();
+        std::lock_guard<std::mutex> lock(registry.Mutex);
+
+        auto& slots = registry.ActiveDuelSlots;
+        for (auto it = slots.begin(); it != slots.end();)
+        {
+            if (it->PairId == pairId && it->Owner == owner)
+                it = slots.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    inline void ReleaseDuelStagingSlotByActivity(std::uint64_t activityId, ReservationOwner owner)
     {
         if (activityId == 0)
             return;
@@ -375,7 +430,7 @@ namespace PlayerbotsLife
         auto& slots = registry.ActiveDuelSlots;
         for (auto it = slots.begin(); it != slots.end();)
         {
-            if (it->ActivityId == activityId || it->SlotId == static_cast<std::uint32_t>(activityId))
+            if (it->ActivityId == activityId && it->Owner == owner)
                 it = slots.erase(it);
             else
                 ++it;
@@ -402,6 +457,18 @@ namespace PlayerbotsLife
     {
         ReservationRegistry& registry = GetReservationRegistry();
         std::lock_guard<std::mutex> lock(registry.Mutex);
+
+        // Bounded pruning of expired cooldowns to prevent memory leaks
+        if (registry.RealPlayerCooldowns.size() > 256)
+        {
+            for (auto it = registry.RealPlayerCooldowns.begin(); it != registry.RealPlayerCooldowns.end();)
+            {
+                if (nowSec >= it->second)
+                    it = registry.RealPlayerCooldowns.erase(it);
+                else
+                    ++it;
+            }
+        }
         registry.RealPlayerCooldowns[playerGuidLow] = nowSec + cooldownSec;
     }
 
@@ -486,8 +553,14 @@ namespace PlayerbotsLife
         auto const entry = registry.Owners.find(guidLow);
         if (entry != registry.Owners.end() && entry->second == owner)
         {
+            auto leaseIt = registry.Leases.find(guidLow);
+            // GUID-only legacy release must not delete modern generation-protected leases
+            if (leaseIt != registry.Leases.end() && leaseIt->second.Generation > 0)
+                return;
+
             registry.Owners.erase(entry);
-            registry.Leases.erase(guidLow);
+            if (leaseIt != registry.Leases.end())
+                registry.Leases.erase(leaseIt);
         }
     }
 }

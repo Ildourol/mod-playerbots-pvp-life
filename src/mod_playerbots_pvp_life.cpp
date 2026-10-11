@@ -64,7 +64,7 @@ class PvPLifeGroupScript : public GroupScript
 {
 public:
     PvPLifeGroupScript()
-        : GroupScript("PvPLifeGroupScript", { GROUPSCRIPT_ON_ADD_MEMBER })
+        : GroupScript("PvPLifeGroupScript", { GROUPHOOK_ON_ADD_MEMBER })
     {
     }
 
@@ -85,7 +85,15 @@ public:
         }
 
         if (hasRealPlayer)
+        {
             sPvPLifeMgr.OnAddGroupMember(guid.GetCounter());
+            for (GroupReference const* ref = group->GetFirstMember(); ref != nullptr; ref = ref->next())
+            {
+                Player const* member = ref->GetSource();
+                if (member && member->GetSession() && member->GetSession()->IsBot())
+                    sPvPLifeMgr.OnAddGroupMember(member->GetGUID().GetCounter());
+            }
+        }
     }
 };
 

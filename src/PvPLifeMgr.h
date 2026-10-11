@@ -57,8 +57,8 @@ namespace PvPLife
         TeamSide TeamForRace(uint8 race) const;
         bool IsConfiguredBotAccount(uint32 accountId);
         bool IsSafeBot(Player* player, bool allowPvPLifeReservation = false) const;
-        bool IsRealPlayer(Player* player) const;
-        uint8 EffectiveMinLevel(uint8 minLevel) const;
+        bool IsRealPlayer(Player const* player) const;
+        uint8 EffectiveMinLevel(uint8 minLevel, ActivityType type = ActivityType::Skirmish) const;
 
         bool StartZone(Zone const& zone, ChatHandler* handler = nullptr, bool forced = false);
         void EndEvent(ActiveEvent const& event, std::string const& reason);
@@ -74,13 +74,24 @@ namespace PvPLife
         void CancelPendingRaidResponse(uint64 responseId, std::string const& reason);
 
         // Movement, combat engagement and duels
-        void ScheduleMove(uint64 eventId, uint32 guidLow, std::string const& name, uint32 mapId,
-            float x, float y, float z, float o, uint32 delaySeconds, bool teleport);
-        void ScheduleDuel(uint64 eventId, uint32 challengerGuid, uint32 targetGuid,
+        void ScheduleMove(uint64 eventId, PlayerbotsLife::LeaseToken const& token, uint32 guidLow,
+            std::string const& name, uint32 mapId, float x, float y, float z, float o, uint32 delaySeconds, bool teleport);
+        void ScheduleDuel(uint64 eventId, uint64 pairId, PlayerbotsLife::LeaseToken const& challengerToken,
+            PlayerbotsLife::LeaseToken const& targetToken, uint32 challengerGuid, uint32 targetGuid,
             std::string const& challengerName, std::string const& targetName, uint32 delaySeconds,
             bool realPlayerTarget = false);
-        void ScheduleEngagement(uint64 eventId, uint32 botGuid, uint32 targetGuid, uint32 delaySeconds);
+        void ScheduleEngagement(uint64 eventId, PlayerbotsLife::LeaseToken const& botToken,
+            uint32 botGuid, uint32 targetGuid, uint32 delaySeconds);
         void ScheduleEventChat(ActiveEvent const& event);
+
+        bool CanExecuteStep(uint64 eventId, uint64 generation, uint32 guidLow) const;
+        void CaptureAIState(Player* player, AIStateJournal& journal) const;
+        void RestoreAIState(Player* player, AIStateJournal const& journal) const;
+        void CloseNativeDuel(Player* player) const;
+
+        static bool TryParseUInt32(std::string const& str, uint32& outVal);
+        static bool TryParseUInt64(std::string const& str, uint64& outVal);
+        static bool TryParseFloat(std::string const& str, float& outVal);
 
         void ProcessMoveQueue();
         void ProcessDuelQueue();
@@ -245,6 +256,7 @@ namespace PvPLife
 
         // Active state
         uint64 _nextEventId = 1;
+        uint64 _nextPairId = 1;
         std::vector<ActiveEvent> _activeEvents;
         std::vector<MoveStep> _moveQueue;
         std::vector<DuelStep> _duelQueue;

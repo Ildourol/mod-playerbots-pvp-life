@@ -64,20 +64,17 @@ namespace PvPLife
 
         void Shutdown()
         {
-            if (!_running)
+            if (!_running.load(std::memory_order_acquire))
                 return;
 
-            {
-                std::lock_guard<std::mutex> lock(_queueMutex);
-                _stopping = true;
-            }
+            _stopping.store(true, std::memory_order_release);
             _cv.notify_all();
 
             if (_workerThread.joinable())
                 _workerThread.join();
 
-            _running = false;
-            _stopping = false;
+            _running.store(false, std::memory_order_release);
+            _stopping.store(false, std::memory_order_release);
         }
 
         ~AuditLogger()
@@ -90,11 +87,11 @@ namespace PvPLife
 
         void StartWorker()
         {
-            if (_running)
+            if (_running.load(std::memory_order_acquire))
                 return;
 
-            _running = true;
-            _stopping = false;
+            _stopping.store(false, std::memory_order_release);
+            _running.store(true, std::memory_order_release);
             _workerThread = std::thread([this]() { WorkerLoop(); });
         }
 
@@ -106,20 +103,28 @@ namespace PvPLife
             while (true)
             {
                 std::queue<std::string> localQueue;
+                std::string targetPath;
+                bool pathChanged = false;
                 {
                     std::unique_lock<std::mutex> lock(_queueMutex);
-                    _cv.wait(lock, [this]() { return !_queue.empty() || _stopping; });
+                    _cv.wait(lock, [this]() { return !_queue.empty() || _stopping.load(std::memory_order_acquire); });
 
                     if (_filePath != currentPath || !_fileReopened)
                     {
-                        if (file.is_open())
-                            file.close();
-                        currentPath = _filePath;
-                        file.open(currentPath, std::ios::app);
+                        targetPath = _filePath;
+                        pathChanged = true;
                         _fileReopened = true;
                     }
 
                     localQueue.swap(_queue);
+                }
+
+                if (pathChanged)
+                {
+                    if (file.is_open())
+                        file.close();
+                    currentPath = targetPath;
+                    file.open(currentPath, std::ios::app);
                 }
 
                 if (file.is_open())
@@ -132,18 +137,22 @@ namespace PvPLife
                     file.flush();
                 }
 
-                if (_stopping)
+                if (_stopping.load(std::memory_order_acquire))
                 {
-                    // Flush any remaining lines added right before stop
-                    std::lock_guard<std::mutex> lock(_queueMutex);
-                    while (!_queue.empty())
+                    std::queue<std::string> residual;
                     {
-                        if (file.is_open())
-                            file << _queue.front();
-                        _queue.pop();
+                        std::lock_guard<std::mutex> lock(_queueMutex);
+                        residual.swap(_queue);
                     }
                     if (file.is_open())
+                    {
+                        while (!residual.empty())
+                        {
+                            file << residual.front();
+                            residual.pop();
+                        }
                         file.flush();
+                    }
                     break;
                 }
             }
@@ -155,7 +164,7 @@ namespace PvPLife
         static constexpr size_t MaxQueueSize = 5000;
         std::atomic<bool> _enabled{false};
         std::atomic<bool> _running{false};
-        bool _stopping{false};
+        std::atomic<bool> _stopping{false};
         bool _fileReopened{false};
         std::string _filePath{"Logs/pvplife_audit.log"};
 

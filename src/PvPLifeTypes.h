@@ -113,6 +113,19 @@ namespace PvPLife
         PlayerbotsLife::LeaseToken Token;
     };
 
+    struct AIStateJournal
+    {
+        std::string CombatStrategies;
+        std::string NonCombatStrategies;
+        bool OriginalPvPFlag = false;
+        bool HadStayPosition = false;
+        float StayX = 0.0f;
+        float StayY = 0.0f;
+        float StayZ = 0.0f;
+        uint32 StayMapId = 0;
+        bool Captured = false;
+    };
+
     struct Participant
     {
         BotCandidate Bot;
@@ -128,6 +141,28 @@ namespace PvPLife
         float ActivityO = 0.0f;
         PlayerbotsLife::LeaseToken Token;
         uint32 DuelStagingSlotId = 0;
+        uint64 PairId = 0;
+        AIStateJournal Journal;
+    };
+
+    enum class DuelPairState : uint8
+    {
+        Approaching = 0,
+        ArrivedIdle = 1,
+        Challenged  = 2,
+        Countdown   = 3,
+        Active      = 4,
+        Closing     = 5
+    };
+
+    struct DuelPair
+    {
+        uint64 PairId = 0;
+        uint64 EventId = 0;
+        uint32 ChallengerGuidLow = 0;
+        uint32 TargetGuidLow = 0;
+        uint32 StagingSlotId = 0;
+        DuelPairState State = DuelPairState::Approaching;
     };
 
     struct ActiveEvent
@@ -139,11 +174,14 @@ namespace PvPLife
         uint32 StartedAt = 0;
         uint32 EndsAt = 0;
         std::vector<Participant> Members;
+        std::vector<DuelPair> DuelPairs;
     };
 
     struct MoveStep
     {
         uint64 EventId = 0;
+        uint64 Generation = 0;
+        PlayerbotsLife::LeaseToken Token;
         uint32 GuidLow = 0;
         std::string Name;
         uint32 ExecuteAt = 0;
@@ -159,6 +197,10 @@ namespace PvPLife
     struct DuelStep
     {
         uint64 EventId = 0;
+        uint64 Generation = 0;
+        uint64 PairId = 0;
+        PlayerbotsLife::LeaseToken ChallengerToken;
+        PlayerbotsLife::LeaseToken TargetToken;
         uint32 ChallengerGuidLow = 0;
         uint32 TargetGuidLow = 0;
         std::string ChallengerName;
@@ -173,10 +215,22 @@ namespace PvPLife
     struct ChatStep
     {
         uint64 EventId = 0;
+        uint64 Generation = 0;
+        PlayerbotsLife::LeaseToken Token;
         uint32 SpeakerGuidLow = 0;
         uint32 ExecuteAt = 0;
         ChatChannel Channel = ChatChannel::Yell;
         std::string Text;
+    };
+
+    enum class ResponseState : uint8
+    {
+        Reserved       = 0,
+        LoginRequested = 1,
+        OnlineReady    = 2,
+        Promoted       = 3,
+        Failed         = 4,
+        Cancelled      = 5
     };
 
     struct PendingRaidResponse
@@ -194,11 +248,14 @@ namespace PvPLife
         std::vector<BotCandidate> Bots;
         std::vector<uint32> PendingLoginGuids;
         bool Cancelled = false;
+        ResponseState State = ResponseState::Reserved;
     };
 
     struct EngagementStep
     {
         uint64 EventId = 0;
+        uint64 Generation = 0;
+        PlayerbotsLife::LeaseToken BotToken;
         uint32 BotGuidLow = 0;
         uint32 TargetGuidLow = 0;
         uint32 ExecuteAt = 0;
