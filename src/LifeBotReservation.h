@@ -8,16 +8,19 @@
 #define LIFE_BOT_RESERVATION_H
 
 #include <atomic>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <ctime>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <utility>
 
 namespace PlayerbotsLife
 {
-    constexpr std::uint32_t LIFE_BOT_RESERVATION_PROTOCOL_VERSION = 2026101101;
+    constexpr std::uint32_t LIFE_BOT_RESERVATION_PROTOCOL_VERSION = 2026101103;
 
     enum class ReservationOwner : std::uint8_t
     {
@@ -47,6 +50,7 @@ namespace PlayerbotsLife
         std::uint32_t GuidLow = 0;
         ReservationOwner Owner = ReservationOwner::CityLife;
         std::uint64_t ActivityId = 0;
+        std::uint64_t AssignmentId = 0;
         std::uint64_t Generation = 0;
         LeaseState State = LeaseState::Provisional;
     };
@@ -74,7 +78,28 @@ namespace PlayerbotsLife
         std::uint32_t ActiveCount = 0;
         std::uint32_t ReleasingCount = 0;
         std::uint32_t ActiveDuelSlots = 0;
+        std::uint32_t WaitingAdmissions = 0;
+        std::uint32_t UnacknowledgedGrants = 0;
         std::uint64_t CurrentGeneration = 0;
+    };
+
+    struct AdmissionRequest
+    {
+        std::uint64_t RequestId{0};
+        ReservationOwner Owner{ReservationOwner::CityLife};
+        std::uint64_t ActivityId{0};
+        std::vector<std::uint32_t> Candidates;
+        std::uint32_t MaximumOwned{0};
+        std::uint32_t TimestampSec{0};
+        std::uint32_t DeadlineSec{0};
+    };
+
+    struct AdmissionGrant
+    {
+        std::uint64_t RequestId{0};
+        ReservationOwner Owner{ReservationOwner::CityLife};
+        std::vector<LeaseToken> Tokens;
+        std::uint32_t TimestampSec{0};
     };
 
     struct ReservationRegistry
@@ -86,8 +111,13 @@ namespace PlayerbotsLife
         std::vector<DuelStagingSlot> ActiveDuelSlots;
         std::atomic<std::uint32_t> ActiveModules{MODULE_NONE};
         std::uint64_t NextGeneration{1};
+        std::uint64_t NextAdmissionRequest{1};
         std::uint32_t StagingSlotIdCounter{1};
         std::uint32_t AdmissionRoundCounter{0};
+        std::uint32_t LastArbitrationSecond{0};
+        ReservationOwner CurrentPriorityOwner{ReservationOwner::CityLife};
+        std::vector<AdmissionRequest> PendingAdmissionRequests;
+        std::vector<AdmissionGrant> RecentAdmissionGrants;
     };
 
     inline ReservationRegistry& GetReservationRegistry()
@@ -124,7 +154,8 @@ namespace PlayerbotsLife
     // -------------------------------------------------------------
 
     inline bool TryAcquireLease(LeaseToken& outToken, std::uint32_t guidLow, ReservationOwner owner,
-                                std::uint64_t activityId, LeaseState initialState = LeaseState::Active)
+                                std::uint64_t activityId, LeaseState initialState = LeaseState::Active,
+                                std::uint64_t assignmentId = 0)
     {
         ReservationRegistry& registry = GetReservationRegistry();
         std::lock_guard<std::mutex> lock(registry.Mutex);
@@ -136,6 +167,7 @@ namespace PlayerbotsLife
         outToken.GuidLow = guidLow;
         outToken.Owner = owner;
         outToken.ActivityId = activityId;
+        outToken.AssignmentId = assignmentId;
         outToken.Generation = gen;
         outToken.State = initialState;
 
@@ -145,7 +177,7 @@ namespace PlayerbotsLife
     }
 
     inline bool TryAcquireBatch(std::vector<LeaseToken>& outTokens, std::vector<std::uint32_t> const& guids,
-                                ReservationOwner owner, std::uint64_t activityId)
+                                ReservationOwner owner, std::uint64_t activityId, std::uint64_t assignmentId = 0)
     {
         if (guids.empty())
         {
@@ -175,6 +207,7 @@ namespace PlayerbotsLife
             token.GuidLow = guidLow;
             token.Owner = owner;
             token.ActivityId = activityId;
+            token.AssignmentId = assignmentId;
             token.Generation = gen;
             token.State = LeaseState::Active;
 
@@ -185,103 +218,76 @@ namespace PlayerbotsLife
         return true;
     }
 
-    inline bool ValidateLease(LeaseToken const& token)
+    inline bool MatchesLease(LeaseToken const& current, LeaseToken const& token)
     {
-        if (token.GuidLow == 0 || token.Generation == 0)
-            return false;
+        return token.GuidLow != 0 && token.Generation != 0 &&
+            current.GuidLow == token.GuidLow && current.Owner == token.Owner &&
+            current.ActivityId == token.ActivityId && current.AssignmentId == token.AssignmentId &&
+            current.Generation == token.Generation;
+    }
 
+    inline bool ValidateLeaseState(LeaseToken const& token, LeaseState state)
+    {
         ReservationRegistry& registry = GetReservationRegistry();
         std::lock_guard<std::mutex> lock(registry.Mutex);
-
         auto it = registry.Leases.find(token.GuidLow);
-        if (it == registry.Leases.end())
-            return false;
+        return it != registry.Leases.end() && MatchesLease(it->second, token) && it->second.State == state;
+    }
 
-        LeaseToken const& current = it->second;
-        return (current.Owner == token.Owner &&
-                current.Generation == token.Generation &&
-                current.ActivityId == token.ActivityId &&
-                current.State != LeaseState::Releasing &&
-                current.State != LeaseState::Released);
+    inline bool ValidateLease(LeaseToken const& token)
+    {
+        ReservationRegistry& registry = GetReservationRegistry();
+        std::lock_guard<std::mutex> lock(registry.Mutex);
+        auto it = registry.Leases.find(token.GuidLow);
+        return it != registry.Leases.end() && MatchesLease(it->second, token) &&
+            (it->second.State == LeaseState::Provisional || it->second.State == LeaseState::Active);
     }
 
     inline bool ValidateActiveLease(LeaseToken const& token)
     {
-        if (token.GuidLow == 0 || token.Generation == 0)
-            return false;
-
-        ReservationRegistry& registry = GetReservationRegistry();
-        std::lock_guard<std::mutex> lock(registry.Mutex);
-
-        auto it = registry.Leases.find(token.GuidLow);
-        if (it == registry.Leases.end())
-            return false;
-
-        LeaseToken const& current = it->second;
-        return (current.Owner == token.Owner &&
-                current.Generation == token.Generation &&
-                current.ActivityId == token.ActivityId &&
-                current.State == LeaseState::Active);
+        return ValidateLeaseState(token, LeaseState::Active);
     }
 
-    inline void BeginRelease(LeaseToken const& token)
+    inline bool BeginRelease(LeaseToken const& token)
     {
-        if (token.GuidLow == 0)
-            return;
-
         ReservationRegistry& registry = GetReservationRegistry();
         std::lock_guard<std::mutex> lock(registry.Mutex);
-
         auto it = registry.Leases.find(token.GuidLow);
-        if (it != registry.Leases.end() &&
-            it->second.Owner == token.Owner &&
-            it->second.Generation == token.Generation)
-        {
-            it->second.State = LeaseState::Releasing;
-        }
+        if (it == registry.Leases.end() || !MatchesLease(it->second, token))
+            return false;
+        it->second.State = LeaseState::Releasing;
+        return true;
+    }
+
+    inline bool ReleaseLeaseExact(LeaseToken const& token)
+    {
+        ReservationRegistry& registry = GetReservationRegistry();
+        std::lock_guard<std::mutex> lock(registry.Mutex);
+        auto it = registry.Leases.find(token.GuidLow);
+        if (it == registry.Leases.end() || !MatchesLease(it->second, token))
+            return false;
+        registry.Leases.erase(it);
+        registry.Owners.erase(token.GuidLow);
+        return true;
     }
 
     inline void ReleaseLease(LeaseToken const& token)
     {
-        if (token.GuidLow == 0)
-            return;
-
-        ReservationRegistry& registry = GetReservationRegistry();
-        std::lock_guard<std::mutex> lock(registry.Mutex);
-
-        auto it = registry.Leases.find(token.GuidLow);
-        if (it != registry.Leases.end() &&
-            it->second.Owner == token.Owner &&
-            it->second.Generation == token.Generation)
-        {
-            registry.Leases.erase(it);
-            registry.Owners.erase(token.GuidLow);
-        }
+        ReleaseLeaseExact(token);
     }
 
     inline bool PromoteLease(LeaseToken& token, std::uint64_t newActivityId = 0)
     {
-        if (token.GuidLow == 0)
-            return false;
-
         ReservationRegistry& registry = GetReservationRegistry();
         std::lock_guard<std::mutex> lock(registry.Mutex);
-
         auto it = registry.Leases.find(token.GuidLow);
-        if (it == registry.Leases.end() ||
-            it->second.Owner != token.Owner ||
-            it->second.Generation != token.Generation)
-        {
+        if (it == registry.Leases.end() || !MatchesLease(it->second, token) ||
+            (it->second.State != LeaseState::Provisional && it->second.State != LeaseState::Active))
             return false;
-        }
-
         it->second.State = LeaseState::Active;
         if (newActivityId != 0)
-        {
             it->second.ActivityId = newActivityId;
-            token.ActivityId = newActivityId;
-        }
-        token.State = LeaseState::Active;
+        token = it->second;
         return true;
     }
 
@@ -476,12 +482,166 @@ namespace PlayerbotsLife
     // Fair Admission Round Arbitration
     // -------------------------------------------------------------
 
-    inline ReservationOwner GetNextContestedPriorityOwner()
+    constexpr std::size_t MAX_ADMISSION_REQUESTS = 64;
+    constexpr std::uint32_t ADMISSION_GRANT_SECONDS = 5;
+
+    inline std::uint64_t SubmitAdmissionRequest(ReservationOwner owner, std::uint64_t activityId,
+        std::vector<std::uint32_t> const& guids, std::uint32_t maximumOwned,
+        std::uint32_t nowSec, std::uint32_t deadlineSec)
+    {
+        if (activityId == 0 || guids.empty() || maximumOwned < guids.size() || deadlineSec <= nowSec)
+            return 0;
+        std::unordered_set<std::uint32_t> unique(guids.begin(), guids.end());
+        if (unique.size() != guids.size() || unique.count(0))
+            return 0;
+        ReservationRegistry& registry = GetReservationRegistry();
+        std::lock_guard<std::mutex> lock(registry.Mutex);
+        if (registry.PendingAdmissionRequests.size() + registry.RecentAdmissionGrants.size() >= MAX_ADMISSION_REQUESTS)
+            return 0;
+        AdmissionRequest request;
+        request.RequestId = ++registry.NextAdmissionRequest;
+        request.Owner = owner;
+        request.ActivityId = activityId;
+        request.Candidates = guids;
+        request.MaximumOwned = maximumOwned;
+        request.TimestampSec = nowSec;
+        request.DeadlineSec = deadlineSec;
+        registry.PendingAdmissionRequests.push_back(std::move(request));
+        return registry.PendingAdmissionRequests.back().RequestId;
+    }
+
+    // Metadata only: no entity, AI, database, or chat access under this mutex.
+    inline void ResolveAdmissionRequests(std::uint32_t nowSec)
     {
         ReservationRegistry& registry = GetReservationRegistry();
         std::lock_guard<std::mutex> lock(registry.Mutex);
+        for (auto it = registry.RecentAdmissionGrants.begin(); it != registry.RecentAdmissionGrants.end();)
+        {
+            if (nowSec - it->TimestampSec < ADMISSION_GRANT_SECONDS)
+            {
+                ++it;
+                continue;
+            }
+            for (LeaseToken const& token : it->Tokens)
+            {
+                auto lease = registry.Leases.find(token.GuidLow);
+                if (lease != registry.Leases.end() && MatchesLease(lease->second, token) &&
+                    lease->second.State == LeaseState::Provisional)
+                {
+                    registry.Leases.erase(lease);
+                    registry.Owners.erase(token.GuidLow);
+                }
+            }
+            it = registry.RecentAdmissionGrants.erase(it);
+        }
+        auto& requests = registry.PendingAdmissionRequests;
+        requests.erase(std::remove_if(requests.begin(), requests.end(),
+            [nowSec](AdmissionRequest const& request) { return request.DeadlineSec <= nowSec; }), requests.end());
+        if (registry.LastArbitrationSecond == nowSec)
+            return;
+        registry.LastArbitrationSecond = nowSec;
         ++registry.AdmissionRoundCounter;
-        return (registry.AdmissionRoundCounter % 2 == 0) ? ReservationOwner::CityLife : ReservationOwner::PvPLife;
+        registry.CurrentPriorityOwner = (registry.AdmissionRoundCounter % 2 == 0)
+            ? ReservationOwner::CityLife : ReservationOwner::PvPLife;
+        ReservationOwner preferred = registry.CurrentPriorityOwner;
+        while (!requests.empty())
+        {
+            auto selected = requests.end();
+            for (auto it = requests.begin(); it != requests.end(); ++it)
+            {
+                // Collect both managers' requests before resolving the next second.
+                if (it->TimestampSec >= nowSec)
+                    continue;
+                std::uint32_t owned = 0;
+                for (auto const& entry : registry.Owners)
+                    if (entry.second == it->Owner)
+                        ++owned;
+                if (owned > it->MaximumOwned || it->Candidates.size() > it->MaximumOwned - owned)
+                    continue;
+                bool free = true;
+                for (std::uint32_t guid : it->Candidates)
+                    if (registry.Owners.count(guid))
+                    {
+                        free = false;
+                        break;
+                    }
+                if (!free)
+                    continue;
+                if (selected == requests.end() || (it->Owner == preferred && selected->Owner != preferred))
+                    selected = it;
+            }
+            if (selected == requests.end())
+                break;
+            AdmissionGrant grant;
+            grant.RequestId = selected->RequestId;
+            grant.Owner = selected->Owner;
+            grant.TimestampSec = nowSec;
+            for (std::uint32_t guid : selected->Candidates)
+            {
+                LeaseToken token;
+                token.GuidLow = guid;
+                token.Owner = selected->Owner;
+                token.ActivityId = selected->ActivityId;
+                token.AssignmentId = ++registry.NextGeneration;
+                token.Generation = token.AssignmentId;
+                token.State = LeaseState::Provisional;
+                registry.Owners[guid] = token.Owner;
+                registry.Leases[guid] = token;
+                grant.Tokens.push_back(token);
+            }
+            preferred = selected->Owner == ReservationOwner::CityLife
+                ? ReservationOwner::PvPLife : ReservationOwner::CityLife;
+            registry.RecentAdmissionGrants.push_back(std::move(grant));
+            requests.erase(selected);
+        }
+    }
+
+    inline bool TakeAdmissionGrant(std::uint64_t requestId, ReservationOwner owner,
+        std::vector<LeaseToken>& tokens)
+    {
+        ReservationRegistry& registry = GetReservationRegistry();
+        std::lock_guard<std::mutex> lock(registry.Mutex);
+        auto& grants = registry.RecentAdmissionGrants;
+        auto it = std::find_if(grants.begin(), grants.end(), [requestId, owner](AdmissionGrant const& grant)
+        {
+            return grant.RequestId == requestId && grant.Owner == owner;
+        });
+        if (it == grants.end())
+            return false;
+        tokens = std::move(it->Tokens);
+        grants.erase(it); // Acknowledgement; leases remain provisional until explicitly promoted.
+        return true;
+    }
+
+    inline void CancelAdmissionRequest(std::uint64_t requestId, ReservationOwner owner)
+    {
+        ReservationRegistry& registry = GetReservationRegistry();
+        std::lock_guard<std::mutex> lock(registry.Mutex);
+        auto& requests = registry.PendingAdmissionRequests;
+        requests.erase(std::remove_if(requests.begin(), requests.end(), [requestId, owner](AdmissionRequest const& request)
+        {
+            return request.Owner == owner && (requestId == 0 || request.RequestId == requestId);
+        }), requests.end());
+        auto& grants = registry.RecentAdmissionGrants;
+        for (auto it = grants.begin(); it != grants.end();)
+        {
+            if (it->Owner != owner || (requestId != 0 && it->RequestId != requestId))
+            {
+                ++it;
+                continue;
+            }
+            for (LeaseToken const& token : it->Tokens)
+            {
+                auto lease = registry.Leases.find(token.GuidLow);
+                if (lease != registry.Leases.end() && MatchesLease(lease->second, token) &&
+                    lease->second.State == LeaseState::Provisional)
+                {
+                    registry.Leases.erase(lease);
+                    registry.Owners.erase(token.GuidLow);
+                }
+            }
+            it = grants.erase(it);
+        }
     }
 
     // -------------------------------------------------------------
@@ -497,6 +657,8 @@ namespace PlayerbotsLife
         snap.TotalReserved = static_cast<std::uint32_t>(registry.Owners.size());
         snap.ActiveDuelSlots = static_cast<std::uint32_t>(registry.ActiveDuelSlots.size());
         snap.CurrentGeneration = registry.NextGeneration;
+        snap.WaitingAdmissions = static_cast<std::uint32_t>(registry.PendingAdmissionRequests.size());
+        snap.UnacknowledgedGrants = static_cast<std::uint32_t>(registry.RecentAdmissionGrants.size());
 
         for (auto const& pair : registry.Owners)
         {

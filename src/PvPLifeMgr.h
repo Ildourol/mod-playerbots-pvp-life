@@ -8,6 +8,9 @@
 #define PVP_LIFE_MGR_H
 
 #include "PvPLifeTypes.h"
+#include "AsyncCallbackProcessor.h"
+#include "QueryCallback.h"
+#include "Transaction.h"
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -45,6 +48,8 @@ namespace PvPLife
         std::vector<Zone> LoadZones(bool readyOnly = false, int typeFilter = -1);
         bool LoadZoneByName(std::string name, Zone& out);
         void LoadZoneConfig();
+        void QueueZoneMutation(std::string const& sql);
+        void RefreshAccountCache();
         void ApplyZoneConfig(Zone& zone) const;
         Zone ReadZone(Field* fields);
         std::string ZoneSelectSql(std::string const& suffix = "") const;
@@ -61,7 +66,7 @@ namespace PvPLife
         uint8 EffectiveMinLevel(uint8 minLevel, ActivityType type = ActivityType::Skirmish) const;
 
         bool StartZone(Zone const& zone, ChatHandler* handler = nullptr, bool forced = false);
-        void EndEvent(ActiveEvent const& event, std::string const& reason);
+        void EndEvent(ActiveEvent& event, std::string const& reason);
         void ExpireEvents();
         void MaintainPersistentWorldPvp();
         void MaintainPersistentDuelZones();
@@ -84,10 +89,15 @@ namespace PvPLife
             uint32 botGuid, uint32 targetGuid, uint32 delaySeconds);
         void ScheduleEventChat(ActiveEvent const& event);
 
-        bool CanExecuteStep(uint64 eventId, uint64 generation, uint32 guidLow) const;
+        bool CanExecuteStep(uint64 eventId, uint64 generation, uint32 guidLow, bool allowPreparing = false) const;
+        bool IsHumanControlled(Player* player) const;
+        bool IsOwnedActor(Player* player, Participant const& participant, uint64 eventId) const;
+        void ProcessAdmissionGrants();
+        void QueueParticipantRelease(Participant const& participant, bool returnHome);
+        void RememberDuelIdentity(uint64 eventId, Player* challenger, Player* target);
         void CaptureAIState(Player* player, AIStateJournal& journal) const;
         void RestoreAIState(Player* player, AIStateJournal const& journal) const;
-        void CloseNativeDuel(Player* player) const;
+        void CloseNativeDuel(Player* player, Participant const& participant) const;
 
         static bool TryParseUInt32(std::string const& str, uint32& outVal);
         static bool TryParseUInt64(std::string const& str, uint64& outVal);
@@ -100,6 +110,9 @@ namespace PvPLife
         void ProcessRealPlayerChallenges();
         void MaintainDuelParticipants();
         void MaintainBotDuels();
+        void ProcessReleasingParticipants();
+        void ProcessPreparingEvents();
+        void DeployEventMembers(ActiveEvent& event, uint32& changesCount, uint32 maxChanges);
 
         void ApplyPvpStrategies(Player* player, bool duelMode) const;
         void MoveBot(Player* player, uint32 mapId, float x, float y, float z, float o, bool teleport) const;
@@ -242,6 +255,7 @@ namespace PvPLife
         uint32 _baselinePercent = 20;
         uint32 _burstGraceSeconds = 180;
         uint32 _maxChangesPerTick = 3;
+        uint32 _changesThisTick = 0;
         bool _proportionalZoneScaling = true;
 
         // Compatibility with City Life
@@ -257,6 +271,7 @@ namespace PvPLife
         // Active state
         uint64 _nextEventId = 1;
         uint64 _nextPairId = 1;
+        uint64 _nextAssignmentId = 1;
         std::vector<ActiveEvent> _activeEvents;
         std::vector<MoveStep> _moveQueue;
         std::vector<DuelStep> _duelQueue;
@@ -266,6 +281,37 @@ namespace PvPLife
         std::unordered_map<uint32, uint32> _botChallengeCooldown;
         std::unordered_map<uint32, uint32> _botDuelCooldown;
         std::unordered_map<uint32, bool> _botAccountCache;
+        bool _draining = false;
+        mutable uint32 _lastCensusTimeMs = 0;
+        mutable uint32 _cachedLiveBotCount = 0;
+        QueryCallbackProcessor _queryProcessor;
+        AsyncCallbackProcessor<TransactionCallback> _transactionProcessor;
+        uint32 _pendingZoneWrites = 0;
+        uint64 _dataGeneration = 0;
+        uint64 _zoneSnapshotGeneration = 0;
+        std::vector<Zone> _zoneCache;
+        struct CachedChatLine
+        {
+            ActivityType Type;
+            ChatChannel Channel;
+            TeamSide Team;
+            std::string Text;
+            uint32 Weight;
+        };
+        std::vector<CachedChatLine> _chatCache;
+        std::unordered_map<uint8, std::vector<BotCandidate>> _offlineCandidateCache;
+        std::unordered_map<uint8, uint32> _offlineCandidateRefresh;
+        std::unordered_set<uint8> _offlineCandidateQueries;
+        mutable std::unordered_map<uint32, uint32> _zoneLastRealPlayerTime;
+
+        struct ReleasingParticipant
+        {
+            Participant Part;
+            uint32 EnqueuedAt = 0;
+            uint32 Deadline = 0;
+            bool ReturnHome = false;
+        };
+        std::vector<ReleasingParticipant> _releasingParticipants;
 
         struct ZoneConfig
         {

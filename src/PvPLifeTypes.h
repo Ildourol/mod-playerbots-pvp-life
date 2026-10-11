@@ -77,6 +77,7 @@ namespace PvPLife
         uint8 MinLevel = 1;
         uint8 MaxLevel = 80;
         uint32 MapId = 0;
+        uint32 ZoneId = 0;
         float RallyX = 0.0f;
         float RallyY = 0.0f;
         float RallyZ = 0.0f;
@@ -124,6 +125,9 @@ namespace PvPLife
         float StayZ = 0.0f;
         uint32 StayMapId = 0;
         bool Captured = false;
+        std::vector<std::string> AppliedCombatStrategies;
+        std::vector<std::string> AppliedNonCombatStrategies;
+        bool AppliedPvPFlag = false;
     };
 
     struct Participant
@@ -143,6 +147,9 @@ namespace PvPLife
         uint32 DuelStagingSlotId = 0;
         uint64 PairId = 0;
         AIStateJournal Journal;
+        bool Deployed = false;
+        uint64 DuelArbiter = 0;
+        uint32 DuelOpponentGuid = 0;
     };
 
     enum class DuelPairState : uint8
@@ -163,6 +170,7 @@ namespace PvPLife
         uint32 TargetGuidLow = 0;
         uint32 StagingSlotId = 0;
         DuelPairState State = DuelPairState::Approaching;
+        bool Deployed = false;
     };
 
     struct ActiveEvent
@@ -175,6 +183,14 @@ namespace PvPLife
         uint32 EndsAt = 0;
         std::vector<Participant> Members;
         std::vector<DuelPair> DuelPairs;
+        bool FullyPrepared = false;
+        uint32 PrepareDeadline = 0;
+        uint32 DurationSeconds = 0;
+        uint64 AdmissionRequestId = 0;
+        uint32 RequiredAttackers = 0;
+        uint32 RequiredDefenders = 0;
+        uint32 MinimumTotal = 1;
+        bool Closing = false;
     };
 
     struct MoveStep
@@ -249,6 +265,8 @@ namespace PvPLife
         std::vector<uint32> PendingLoginGuids;
         bool Cancelled = false;
         ResponseState State = ResponseState::Reserved;
+        uint64 AdmissionRequestId = 0;
+        bool LeasesGranted = false;
     };
 
     struct EngagementStep

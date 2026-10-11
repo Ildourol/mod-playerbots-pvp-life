@@ -18,6 +18,7 @@
 #include "Group.h"
 #include "Log.h"
 #include "Map.h"
+#include "MapMgr.h"
 #include "MotionMaster.h"
 #include "ObjectAccessor.h"
 #include "ObjectGuid.h"
@@ -32,6 +33,7 @@
 #include "SocialMgr.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
+#include "StringFormat.h"
 #include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
@@ -174,7 +176,9 @@ namespace PvPLife
 
     void Manager::Shutdown()
     {
-        for (ActiveEvent const& e : _activeEvents)
+        ++_dataGeneration;
+        PlayerbotsLife::CancelAdmissionRequest(0, PlayerbotsLife::ReservationOwner::PvPLife);
+        for (ActiveEvent& e : _activeEvents)
             EndEvent(e, "shutdown");
         _activeEvents.clear();
         _moveQueue.clear();
@@ -182,14 +186,19 @@ namespace PvPLife
         _engagementQueue.clear();
         _chatQueue.clear();
 
+        for (ReleasingParticipant const& rp : _releasingParticipants)
+        {
+            if (rp.Part.Token.GuidLow != 0)
+                PlayerbotsLife::ReleaseLeaseExact(const_cast<PlayerbotsLife::LeaseToken&>(rp.Part.Token));
+        }
+        _releasingParticipants.clear();
+
         for (PendingRaidResponse& p : _pendingResponses)
         {
             for (BotCandidate const& b : p.Bots)
             {
                 if (b.Token.GuidLow != 0)
-                    PlayerbotsLife::ReleaseLease(const_cast<PlayerbotsLife::LeaseToken&>(b.Token));
-                else
-                    ReleaseLifeBot(b.GuidLow);
+                    PlayerbotsLife::ReleaseLeaseExact(const_cast<PlayerbotsLife::LeaseToken&>(b.Token));
             }
             p.Bots.clear();
             p.Cancelled = true;
@@ -201,18 +210,26 @@ namespace PvPLife
 
     void Manager::LoadConfig()
     {
+        for (ActiveEvent& event : _activeEvents)
+            if (!event.FullyPrepared)
+                EndEvent(event, "config-reload");
+        CancelPendingRaidResponse(0, "config-reload");
+        ++_dataGeneration;
+        _lastCensusTimeMs = 0;
         bool prevEnable = _enable;
         _enable = sConfigMgr->GetOption<bool>("PvPLife.Enable", true);
         if (prevEnable && !_enable)
         {
-            while (!_activeEvents.empty())
-                EndEvent(_activeEvents.back(), "config-disabled");
-            for (auto& pending : _pendingResponses)
-                CancelPendingRaidResponse(pending.ResponseId, "config-disabled");
+            _draining = true;
+            for (ActiveEvent& e : _activeEvents)
+                EndEvent(e, "config-disabled");
+            _activeEvents.clear();
+            CancelPendingRaidResponse(0, "config-disabled");
             _moveQueue.clear();
             _duelQueue.clear();
             _engagementQueue.clear();
             _chatQueue.clear();
+            _draining = false;
         }
 
         _debug = sConfigMgr->GetOption<bool>("PvPLife.Debug", false);
@@ -361,6 +378,17 @@ namespace PvPLife
 
         ImportPlayerbotDefaults();
         _botAccountCache.clear();
+        RefreshAccountCache();
+        _offlineCandidateCache.clear();
+        _offlineCandidateRefresh.clear();
+        _offlineCandidateQueries.clear();
+        if (!_botChatEnable)
+            _chatQueue.clear();
+        for (ActiveEvent& event : _activeEvents)
+            if ((event.EventZone.Type == ActivityType::Duel && !_duelEnable) ||
+                (event.EventZone.Type == ActivityType::ForTheHorde && !_forTheHordeEnable) ||
+                (event.EventZone.Type == ActivityType::ForTheAlliance && !_forTheAllianceEnable))
+                EndEvent(event, "activity-disabled");
         _zoneConfig.clear();
         _startupElapsedMs = 0;
         _timerMs = 0;
@@ -449,31 +477,64 @@ namespace PvPLife
         z.Weight = f[23].Get<uint32>(); z.CooldownSeconds = f[24].Get<uint32>(); z.LastStart = f[25].Get<uint32>();
         z.ChallengePlayers = f[26].Get<uint8>() != 0;
         z.BotChat = f[27].Get<uint8>() != 0;
+        z.ZoneId = sMapMgr->GetZoneId(PHASEMASK_NORMAL, z.MapId, z.RallyX, z.RallyY, z.RallyZ);
         return z;
     }
 
     void Manager::LoadZoneConfig()
     {
-        QueryResult result = WorldDatabase.Query(ZoneSelectSql("ORDER BY id").c_str());
-        if (!result)
-            return;
-
-        uint32 minimumPopulation = _minimumBotsPerSide * 2;
-        uint32 maximumPopulation = _maxBotsPerSide * 2;
-        do
-        {
-            Zone zone = ReadZone(result->Fetch());
-            ZoneConfig config;
-            std::string prefix = "PvPLife.Zone." + zone.Name;
-            config.Enabled = sConfigMgr->GetOption<bool>(prefix + ".Enable", zone.Enabled, false);
-            config.MinPopulation = std::clamp<uint32>(
-                sConfigMgr->GetOption<uint32>(prefix + ".MinPopulation", zone.PopulationMin, false),
-                minimumPopulation, maximumPopulation);
-            config.MaxPopulation = std::clamp<uint32>(
-                sConfigMgr->GetOption<uint32>(prefix + ".MaxPopulation", zone.PopulationMax, false),
-                config.MinPopulation, maximumPopulation);
-            _zoneConfig[zone.Name] = config;
-        } while (result->NextRow());
+        uint64 generation = _dataGeneration;
+        uint64 snapshot = ++_zoneSnapshotGeneration;
+        _queryProcessor.AddCallback(WorldDatabase.AsyncQuery(ZoneSelectSql("ORDER BY id")).WithCallback(
+            [this, generation, snapshot](QueryResult result)
+            {
+                if (generation != _dataGeneration || snapshot != _zoneSnapshotGeneration)
+                    return;
+                if (!result)
+                {
+                    _zoneCache.clear();
+                    _zoneConfig.clear();
+                    LOG_WARN("module", "[PvPLife] Zone snapshot is empty or unavailable; no new zones scheduled.");
+                    return;
+                }
+                _zoneConfig.clear();
+                _zoneCache.clear();
+                uint32 minimumPopulation = _minimumBotsPerSide * 2;
+                uint32 maximumPopulation = _maxBotsPerSide * 2;
+                do
+                {
+                    Zone zone = ReadZone(result->Fetch());
+                    ZoneConfig config;
+                    std::string prefix = "PvPLife.Zone." + zone.Name;
+                    config.Enabled = sConfigMgr->GetOption<bool>(prefix + ".Enable", zone.Enabled, false);
+                    config.MinPopulation = std::clamp<uint32>(
+                        sConfigMgr->GetOption<uint32>(prefix + ".MinPopulation", zone.PopulationMin, false),
+                        minimumPopulation, maximumPopulation);
+                    config.MaxPopulation = std::clamp<uint32>(
+                        sConfigMgr->GetOption<uint32>(prefix + ".MaxPopulation", zone.PopulationMax, false),
+                        config.MinPopulation, maximumPopulation);
+                    _zoneConfig[zone.Name] = config;
+                    _zoneCache.push_back(zone);
+                } while (result->NextRow());
+            }));
+        _queryProcessor.AddCallback(WorldDatabase.AsyncQuery(
+            "SELECT activity_type,channel,speaker_team,text,weight FROM pvp_life_chat WHERE enabled=1 ORDER BY id").WithCallback(
+            [this, generation, snapshot](QueryResult result)
+            {
+                if (generation != _dataGeneration || snapshot != _zoneSnapshotGeneration)
+                    return;
+                std::vector<CachedChatLine> lines;
+                if (result)
+                    do
+                    {
+                        Field* fields = result->Fetch();
+                        lines.push_back({ static_cast<ActivityType>(fields[0].Get<uint8>()),
+                            static_cast<ChatChannel>(fields[1].Get<uint8>()),
+                            static_cast<TeamSide>(fields[2].Get<uint8>()), fields[3].Get<std::string>(),
+                            std::max<uint32>(1, fields[4].Get<uint32>()) });
+                    } while (result->NextRow());
+                _chatCache = std::move(lines);
+            }));
     }
 
     void Manager::ApplyZoneConfig(Zone& zone) const
@@ -490,34 +551,29 @@ namespace PvPLife
     std::vector<Zone> Manager::LoadZones(bool readyOnly, int typeFilter)
     {
         std::vector<Zone> zones;
-        std::string where = "WHERE 1=1";
-        if (typeFilter >= 0)
-            where += " AND activity_type=" + std::to_string(typeFilter);
-        if (readyOnly)
+        uint32 now = GameTimeSeconds();
+        for (Zone zone : _zoneCache)
         {
-            uint32 now = GameTimeSeconds();
-            where += " AND (last_start=0 OR last_start + cooldown_seconds <= " + std::to_string(now) + ")";
+            ApplyZoneConfig(zone);
+            if (!zone.Enabled || !zone.Weight || (typeFilter >= 0 && int(zone.Type) != typeFilter) ||
+                (readyOnly && zone.LastStart && now - zone.LastStart < zone.CooldownSeconds))
+                continue;
+            zones.push_back(zone);
         }
-        QueryResult result = WorldDatabase.Query(ZoneSelectSql(where + " ORDER BY weight DESC, id ASC").c_str());
-        if (!result)
-            return zones;
-        do
+        std::sort(zones.begin(), zones.end(), [](Zone const& a, Zone const& b)
         {
-            Zone z = ReadZone(result->Fetch());
-            ApplyZoneConfig(z);
-            if (z.Weight > 0 && z.Enabled)
-                zones.push_back(z);
-        } while (result->NextRow());
+            return a.Weight != b.Weight ? a.Weight > b.Weight : a.Id < b.Id;
+        });
         return zones;
     }
 
     bool Manager::LoadZoneByName(std::string name, Zone& out)
     {
-        WorldDatabase.EscapeString(name);
-        QueryResult result = WorldDatabase.Query(ZoneSelectSql("WHERE name='" + name + "' LIMIT 1").c_str());
-        if (!result)
+        auto zone = std::find_if(_zoneCache.begin(), _zoneCache.end(),
+            [&](Zone const& current) { return Lower(current.Name) == Lower(name); });
+        if (zone == _zoneCache.end())
             return false;
-        out = ReadZone(result->Fetch());
+        out = *zone;
         ApplyZoneConfig(out);
         return true;
     }
@@ -551,38 +607,40 @@ namespace PvPLife
         return ObjectAccessor::FindPlayer(guid);
     }
 
+    void Manager::RefreshAccountCache()
+    {
+        std::string prefix = Lower(_botAccountPrefix);
+        LoginDatabase.EscapeString(prefix);
+        std::string sql = Acore::StringFormat(
+            "SELECT id,username FROM account WHERE ({} > 0 AND id BETWEEN {} AND {}) OR "
+            "({} > 0 AND LEFT(LOWER(username),{})='{}')",
+            _botAccountMax, _botAccountMin, _botAccountMax, _botAccountPrefix.size(), _botAccountPrefix.size(), prefix);
+        uint64 generation = _dataGeneration;
+        _queryProcessor.AddCallback(LoginDatabase.AsyncQuery(sql).WithCallback([this, generation](QueryResult result)
+        {
+            if (generation != _dataGeneration || !result)
+                return;
+            do
+            {
+                uint32 id = result->Fetch()[0].Get<uint32>();
+                bool range = _botAccountMax > 0 && id >= _botAccountMin && id <= _botAccountMax;
+                bool prefixMatch = !_botAccountPrefix.empty() &&
+                    Lower(result->Fetch()[1].Get<std::string>()).rfind(Lower(_botAccountPrefix), 0) == 0;
+                bool all = _accountFilterMode == AccountFilterMode::All &&
+                    _botAccountMax > 0 && !_botAccountPrefix.empty();
+                _botAccountCache[id] = all ? range && prefixMatch : range || prefixMatch;
+            } while (result->NextRow());
+        }));
+    }
+
     bool Manager::IsConfiguredBotAccount(uint32 accountId)
     {
-        if (!accountId)
-            return false;
         auto cached = _botAccountCache.find(accountId);
         if (cached != _botAccountCache.end())
             return cached->second;
-
-        bool hasRange = _botAccountMax > 0 && _botAccountMax >= _botAccountMin;
-        bool rangeOk = hasRange && (accountId >= _botAccountMin && accountId <= _botAccountMax);
-        bool hasPrefix = !_botAccountPrefix.empty();
-        bool prefixOk = false;
-
-        if (hasPrefix)
-        {
-            QueryResult result = LoginDatabase.Query("SELECT username FROM account WHERE id={} LIMIT 1", accountId);
-            if (result)
-            {
-                std::string username = Lower(result->Fetch()[0].Get<std::string>());
-                std::string prefix = Lower(_botAccountPrefix);
-                prefixOk = username.rfind(prefix, 0) == 0;
-            }
-        }
-
-        bool ok = false;
-        if (_accountFilterMode == AccountFilterMode::All && hasRange && hasPrefix)
-            ok = rangeOk && prefixOk;
-        else
-            ok = rangeOk || prefixOk;
-
-        _botAccountCache[accountId] = ok;
-        return ok;
+        bool range = accountId && _botAccountMax > 0 && _botAccountMax >= _botAccountMin &&
+            accountId >= _botAccountMin && accountId <= _botAccountMax;
+        return range && !(_accountFilterMode == AccountFilterMode::All && !_botAccountPrefix.empty());
     }
 
     bool Manager::IsRealPlayer(Player const* player) const
@@ -636,7 +694,7 @@ namespace PvPLife
             for (Participant const& p : e.Members)
                 if (p.Bot.GuidLow == guidLow)
                 {
-                    if (p.Token.GuidLow != 0 && !PlayerbotsLife::ValidateLease(p.Token))
+                    if (!PlayerbotsLife::ValidateLease(p.Token))
                         return false;
                     return true;
                 }
@@ -645,10 +703,14 @@ namespace PvPLife
             for (BotCandidate const& b : r.Bots)
                 if (b.GuidLow == guidLow)
                 {
-                    if (b.Token.GuidLow != 0 && !PlayerbotsLife::ValidateLease(b.Token))
+                    if (!PlayerbotsLife::ValidateLease(b.Token))
                         return false;
                     return true;
                 }
+
+        for (ReleasingParticipant const& rp : _releasingParticipants)
+            if (rp.Part.Bot.GuidLow == guidLow && PlayerbotsLife::ValidateLeaseState(rp.Part.Token, PlayerbotsLife::LeaseState::Releasing))
+                return true;
 
         return false;
     }
@@ -667,7 +729,7 @@ namespace PvPLife
 
     void Manager::CaptureAIState(Player* player, AIStateJournal& journal) const
     {
-        if (!player)
+        if (!player || journal.Captured)
             return;
 
         journal.OriginalPvPFlag = player->IsPvP();
@@ -691,7 +753,7 @@ namespace PvPLife
 
     void Manager::RestoreAIState(Player* player, AIStateJournal const& journal) const
     {
-        if (!player || !journal.Captured)
+        if (!player || !journal.Captured || IsHumanControlled(player))
             return;
 
         if (player->GetGroup())
@@ -704,158 +766,139 @@ namespace PvPLife
             }
         }
 
-        if (player->IsPvP() != journal.OriginalPvPFlag)
+        if (player->IsPvP() == journal.AppliedPvPFlag && player->IsPvP() != journal.OriginalPvPFlag)
             player->SetPvP(journal.OriginalPvPFlag);
 
         if (PlayerbotAI* ai = GET_PLAYERBOT_AI(player))
         {
-            if (!journal.CombatStrategies.empty())
+            if (ai->GetStrategies(BOT_STATE_COMBAT) == journal.AppliedCombatStrategies)
             {
                 ai->ClearStrategies(BOT_STATE_COMBAT);
                 for (std::string const& s : journal.CombatStrategies)
                     ai->ChangeStrategy("+" + s, BOT_STATE_COMBAT);
             }
-            if (!journal.NonCombatStrategies.empty())
+            if (ai->GetStrategies(BOT_STATE_NON_COMBAT) == journal.AppliedNonCombatStrategies)
             {
                 ai->ClearStrategies(BOT_STATE_NON_COMBAT);
                 for (std::string const& s : journal.NonCombatStrategies)
                     ai->ChangeStrategy("+" + s, BOT_STATE_NON_COMBAT);
             }
 
-            PositionMap& positions = ai->GetAiObjectContext()->GetValue<PositionMap&>("position")->Get();
-            PositionInfo stay = positions["stay"];
-            if (journal.HadStayPosition)
-                stay.Set(journal.StayX, journal.StayY, journal.StayZ, journal.StayMapId);
-            else
-                stay.Reset();
-            positions["stay"] = stay;
         }
     }
 
-    void Manager::CloseNativeDuel(Player* player) const
+    void Manager::CloseNativeDuel(Player* player, Participant const& part) const
     {
-        if (!player || !player->duel)
+        if (!player || !player->duel || !part.DuelArbiter || !player->duel->Opponent ||
+            player->GetGuidValue(PLAYER_DUEL_ARBITER).GetRawValue() != part.DuelArbiter ||
+            player->duel->Opponent->GetGUID().GetCounter() != part.DuelOpponentGuid)
             return;
-
         WorldPacket packet(CMSG_DUEL_CANCELLED, 8);
         packet << player->GetGuidValue(PLAYER_DUEL_ARBITER);
         if (player->GetSession())
             player->GetSession()->HandleDuelCancelledOpcode(packet);
-        else
-            player->DuelComplete(DUEL_INTERRUPTED);
     }
 
-    bool Manager::CanExecuteStep(uint64 eventId, uint64 generation, uint32 guidLow) const
+    void Manager::RememberDuelIdentity(uint64 eventId, Player* challenger, Player* target)
     {
-        if (guidLow == 0)
-            return false;
+        if (!challenger || !target || !challenger->duel || !target->duel ||
+            challenger->duel->Opponent != target || target->duel->Opponent != challenger ||
+            challenger->GetGuidValue(PLAYER_DUEL_ARBITER) != target->GetGuidValue(PLAYER_DUEL_ARBITER))
+            return;
+        for (ActiveEvent& event : _activeEvents)
+            if (event.EventId == eventId && !event.Closing)
+                for (Participant& part : event.Members)
+                {
+                    Player* player = part.Bot.GuidLow == challenger->GetGUID().GetCounter() ? challenger :
+                        (part.Bot.GuidLow == target->GetGUID().GetCounter() ? target : nullptr);
+                    if (player && PlayerbotsLife::ValidateActiveLease(part.Token))
+                    {
+                        part.DuelArbiter = player->GetGuidValue(PLAYER_DUEL_ARBITER).GetRawValue();
+                        part.DuelOpponentGuid = player->duel->Opponent->GetGUID().GetCounter();
+                    }
+                }
+    }
 
-        auto eventIt = std::find_if(_activeEvents.begin(), _activeEvents.end(),
-            [eventId](ActiveEvent const& e) { return e.EventId == eventId; });
-        if (eventIt == _activeEvents.end())
-            return false;
-
-        auto memberIt = std::find_if(eventIt->Members.begin(), eventIt->Members.end(),
-            [guidLow](Participant const& p) { return p.Bot.GuidLow == guidLow; });
-        if (memberIt == eventIt->Members.end())
-            return false;
-
-        if (generation != 0 && memberIt->Token.Generation != generation)
-            return false;
-
-        if (memberIt->Token.GuidLow != 0 && !PlayerbotsLife::ValidateLease(memberIt->Token))
-            return false;
-
-        Player* player = FindPlayer(guidLow);
-        if (!player || !player->IsInWorld() || !player->GetSession() || !player->IsAlive())
-            return false;
-
-        if (player->IsBeingTeleported() || player->IsInFlight())
-            return false;
-
+    bool Manager::IsHumanControlled(Player* player) const
+    {
+        if (!player || !player->GetSession())
+            return true;
         PlayerbotAI* ai = GET_PLAYERBOT_AI(player);
-        if (!ai || ::IsRealPlayer(player) || ai->HasGameClientMaster())
-            return false;
+        if (!ai || ::IsRealPlayer(player) || ::IsSelfBot(player) || ai->HasGameClientMaster())
+            return true;
+        if (Group* group = player->GetGroup())
+            for (GroupReference const* ref = group->GetFirstMember(); ref; ref = ref->next())
+                if (Player* member = ref->GetSource(); member && (::IsRealPlayer(member) || ::IsSelfBot(member)))
+                    return true;
+        return false;
+    }
 
-        return true;
+    bool Manager::IsOwnedActor(Player* player, Participant const& part, uint64 eventId) const
+    {
+        if (!player || part.Token.GuidLow != part.Bot.GuidLow || part.Token.ActivityId != eventId ||
+            part.Token.Owner != PlayerbotsLife::ReservationOwner::PvPLife ||
+            !PlayerbotsLife::ValidateActiveLease(part.Token) || IsHumanControlled(player))
+            return false;
+        return IsSafeBot(player, true);
+    }
+
+    bool Manager::CanExecuteStep(uint64 eventId, uint64 generation, uint32 guidLow, bool allowPreparing) const
+    {
+        auto event = std::find_if(_activeEvents.begin(), _activeEvents.end(),
+            [eventId](ActiveEvent const& current) { return current.EventId == eventId; });
+        uint32 now = GameTimeSeconds();
+        if (event == _activeEvents.end() || event->Closing || event->EndsAt <= now ||
+            (!allowPreparing && !event->FullyPrepared) || event->AdmissionRequestId != 0)
+            return false;
+        auto part = std::find_if(event->Members.begin(), event->Members.end(),
+            [guidLow](Participant const& current) { return current.Bot.GuidLow == guidLow; });
+        if (part == event->Members.end() || !part->Deployed || part->Token.Generation != generation ||
+            part->Token.GuidLow != guidLow || part->Token.ActivityId != eventId ||
+            part->Token.Owner != PlayerbotsLife::ReservationOwner::PvPLife ||
+            !PlayerbotsLife::ValidateActiveLease(part->Token))
+            return false;
+        Player* player = FindPlayer(guidLow);
+        return player && player->IsInWorld() && player->IsAlive() && !IsHumanControlled(player) &&
+            !player->IsInFlight() && !player->InBattleground() && !player->InBattlegroundQueue() &&
+            player->GetMap() && !player->GetMap()->Instanceable();
     }
 
     void Manager::DisengageParticipant(uint32 guidLow)
     {
-        bool found = false;
-        PlayerbotsLife::LeaseToken tokenToRelease;
-        uint32 stagingSlotToRelease = 0;
-        AIStateJournal journal;
-
-        for (auto& event : _activeEvents)
+        for (ActiveEvent& event : _activeEvents)
         {
             auto it = std::find_if(event.Members.begin(), event.Members.end(),
-                [guidLow](Participant const& p) { return p.Bot.GuidLow == guidLow; });
-            if (it != event.Members.end())
-            {
-                tokenToRelease = it->Token;
-                stagingSlotToRelease = it->DuelStagingSlotId;
-                journal = it->Journal;
-                LOG_INFO("module", "[PvPLife] Disengaged participant {} from event #{}", guidLow, event.EventId);
-                event.Members.erase(it);
-
-                // Clean up any duel pairs involving this participant
-                event.DuelPairs.erase(std::remove_if(event.DuelPairs.begin(), event.DuelPairs.end(),
-                    [guidLow](DuelPair const& dp) { return dp.ChallengerGuidLow == guidLow || dp.TargetGuidLow == guidLow; }),
-                    event.DuelPairs.end());
-
-                found = true;
-                break;
-            }
+                [guidLow](Participant const& part) { return part.Bot.GuidLow == guidLow; });
+            if (it == event.Members.end() || !PlayerbotsLife::ValidateLease(it->Token))
+                continue;
+            Participant departing = *it;
+            event.Members.erase(it);
+            QueueParticipantRelease(departing, false);
+            event.DuelPairs.erase(std::remove_if(event.DuelPairs.begin(), event.DuelPairs.end(),
+                [guidLow](DuelPair const& pair) { return pair.ChallengerGuidLow == guidLow || pair.TargetGuidLow == guidLow; }),
+                event.DuelPairs.end());
+            if (departing.DuelStagingSlotId)
+                PlayerbotsLife::ReleaseDuelStagingSlot(departing.DuelStagingSlotId, PlayerbotsLife::ReservationOwner::PvPLife);
+            break;
         }
-
-        if (!found)
+        for (PendingRaidResponse& pending : _pendingResponses)
         {
-            for (auto& pending : _pendingResponses)
+            auto it = std::find_if(pending.Bots.begin(), pending.Bots.end(),
+                [guidLow](BotCandidate const& bot) { return bot.GuidLow == guidLow; });
+            if (it != pending.Bots.end() && PlayerbotsLife::ValidateLease(it->Token))
             {
-                auto it = std::find_if(pending.Bots.begin(), pending.Bots.end(),
-                    [guidLow](BotCandidate const& b) { return b.GuidLow == guidLow; });
-                if (it != pending.Bots.end())
-                {
-                    tokenToRelease = it->Token;
-                    pending.Bots.erase(it);
-                    found = true;
-                    break;
-                }
+                PlayerbotsLife::ReleaseLeaseExact(it->Token);
+                pending.Bots.erase(it);
             }
         }
-
-        if (!found)
-            return; // Never touch or reset a non-participant bot
-
-        // Step 1: Mark lease as releasing
-        if (tokenToRelease.GuidLow != 0)
-            PlayerbotsLife::BeginRelease(tokenToRelease);
-
-        // Step 2: Cancel staging slots and queued actions
-        if (stagingSlotToRelease != 0)
-            PlayerbotsLife::ReleaseDuelStagingSlot(stagingSlotToRelease, PlayerbotsLife::ReservationOwner::PvPLife);
-
         _moveQueue.erase(std::remove_if(_moveQueue.begin(), _moveQueue.end(),
-            [guidLow](MoveStep const& s) { return s.GuidLow == guidLow; }), _moveQueue.end());
+            [guidLow](MoveStep const& step) { return step.GuidLow == guidLow; }), _moveQueue.end());
         _duelQueue.erase(std::remove_if(_duelQueue.begin(), _duelQueue.end(),
-            [guidLow](DuelStep const& s) { return s.ChallengerGuidLow == guidLow || s.TargetGuidLow == guidLow; }), _duelQueue.end());
+            [guidLow](DuelStep const& step) { return step.ChallengerGuidLow == guidLow || step.TargetGuidLow == guidLow; }), _duelQueue.end());
         _engagementQueue.erase(std::remove_if(_engagementQueue.begin(), _engagementQueue.end(),
-            [guidLow](EngagementStep const& s) { return s.BotGuidLow == guidLow || s.TargetGuidLow == guidLow; }), _engagementQueue.end());
+            [guidLow](EngagementStep const& step) { return step.BotGuidLow == guidLow || step.TargetGuidLow == guidLow; }), _engagementQueue.end());
         _chatQueue.erase(std::remove_if(_chatQueue.begin(), _chatQueue.end(),
-            [guidLow](ChatStep const& s) { return s.SpeakerGuidLow == guidLow; }), _chatQueue.end());
-
-        // Step 3 & 4: Restore state written by module
-        if (Player* p = FindPlayer(guidLow))
-        {
-            CloseNativeDuel(p);
-            RestoreAIState(p, journal);
-        }
-
-        // Step 5 & 6: Release exact lease and registry ownership
-        if (tokenToRelease.GuidLow != 0)
-            PlayerbotsLife::ReleaseLease(tokenToRelease);
-        ReleaseLifeBot(guidLow);
+            [guidLow](ChatStep const& step) { return step.SpeakerGuidLow == guidLow; }), _chatQueue.end());
     }
 
     uint8 Manager::EffectiveMinLevel(uint8 minLevel, ActivityType type) const
@@ -944,39 +987,52 @@ namespace PvPLife
     std::vector<BotCandidate> Manager::LoadOfflineCandidates(TeamSide team, uint8 level,
         std::unordered_set<uint32> const& excluded)
     {
-        std::vector<BotCandidate> candidates;
-        uint32 queryCeiling = (_botQueryLimit > 0) ? _botQueryLimit : 100;
-        QueryResult result = CharacterDatabase.Query(
-            "SELECT guid,account,name,level,race,class,online FROM characters "
-            "WHERE online=0 AND level={} ORDER BY RAND() LIMIT {}", level, queryCeiling);
-        if (!result)
-            return candidates;
-
-        do
+        uint32 now = GameTimeSeconds();
+        auto refreshed = _offlineCandidateRefresh.find(level);
+        if (!_offlineCandidateQueries.count(level) &&
+            (refreshed == _offlineCandidateRefresh.end() || now - refreshed->second >= 30))
         {
-            Field* f = result->Fetch();
-            BotCandidate b;
-            b.GuidLow = f[0].Get<uint32>();
-            b.AccountId = f[1].Get<uint32>();
-            b.Name = f[2].Get<std::string>();
-            b.Level = f[3].Get<uint8>();
-            b.Race = f[4].Get<uint8>();
-            b.Class = f[5].Get<uint8>();
-            b.Online = false;
-            b.Team = TeamForRace(b.Race);
-
-            if (excluded.find(b.GuidLow) != excluded.end() || IsParticipant(b.GuidLow))
-                continue;
-            if (PlayerbotsLife::IsReserved(b.GuidLow))
-                continue;
-            if (team != TeamSide::Any && b.Team != team)
-                continue;
-            if (!IsConfiguredBotAccount(b.AccountId))
-                continue;
-
-            candidates.push_back(b);
-        } while (result->NextRow());
-
+            _offlineCandidateQueries.insert(level);
+            uint64 generation = _dataGeneration;
+            uint32 ceiling = _botQueryLimit ? _botQueryLimit : 100;
+            std::string sql = Acore::StringFormat(
+                "SELECT guid,account,name,level,race,class FROM characters "
+                "WHERE online=0 AND level={} ORDER BY RAND() LIMIT {}", level, ceiling);
+            _queryProcessor.AddCallback(CharacterDatabase.AsyncQuery(sql).WithCallback(
+                [this, generation, level](QueryResult result)
+                {
+                    if (generation != _dataGeneration)
+                        return;
+                    _offlineCandidateQueries.erase(level);
+                    std::vector<BotCandidate> candidates;
+                    if (result)
+                        do
+                        {
+                            Field* fields = result->Fetch();
+                            BotCandidate bot;
+                            bot.GuidLow = fields[0].Get<uint32>();
+                            bot.AccountId = fields[1].Get<uint32>();
+                            bot.Name = fields[2].Get<std::string>();
+                            bot.Level = fields[3].Get<uint8>();
+                            bot.Race = fields[4].Get<uint8>();
+                            bot.Class = fields[5].Get<uint8>();
+                            bot.Team = TeamForRace(bot.Race);
+                            bot.Online = false;
+                            candidates.push_back(std::move(bot));
+                        } while (result->NextRow());
+                    _offlineCandidateCache[level] = std::move(candidates);
+                    _offlineCandidateRefresh[level] = GameTimeSeconds();
+                }));
+        }
+        std::vector<BotCandidate> candidates;
+        auto cached = _offlineCandidateCache.find(level);
+        if (cached == _offlineCandidateCache.end())
+            return candidates;
+        for (BotCandidate const& bot : cached->second)
+            if (!FindPlayer(bot.GuidLow) && !excluded.count(bot.GuidLow) && !IsParticipant(bot.GuidLow) &&
+                !PlayerbotsLife::IsReserved(bot.GuidLow) && (team == TeamSide::Any || bot.Team == team) &&
+                IsConfiguredBotAccount(bot.AccountId))
+                candidates.push_back(bot);
         return candidates;
     }
 
@@ -989,24 +1045,30 @@ namespace PvPLife
 
     uint32 Manager::GetLiveWorldBotCount() const
     {
+        uint32 now = GameTimeMS();
+        if (_lastCensusTimeMs && now - _lastCensusTimeMs < 5000)
+            return _cachedLiveBotCount;
         uint32 count = 0;
         std::shared_lock<std::shared_mutex> playerLock(*HashMapHolder<Player>::GetLock());
-        HashMapHolder<Player>::MapType const& players = ObjectAccessor::GetPlayers();
-        for (auto const& pair : players)
+        for (auto const& entry : ObjectAccessor::GetPlayers())
         {
-            Player* p = pair.second;
-            if (!p || !p->GetSession() || !p->IsInWorld())
+            Player* player = entry.second;
+            if (!player || !player->GetSession() || !player->IsInWorld())
                 continue;
-            if (::IsRealPlayer(p))
+            if (::IsRealPlayer(player))
+            {
+                _zoneLastRealPlayerTime[player->GetZoneId()] = GameTimeSeconds();
                 continue;
-            if (!sRandomPlayerbotMgr.IsRandomBot(p) &&
-                !const_cast<Manager*>(this)->IsConfiguredBotAccount(p->GetSession()->GetAccountId()))
+            }
+            if (IsHumanControlled(player) || !player->IsAlive() || player->InBattleground() ||
+                player->InBattlegroundQueue() || !player->GetMap() || player->GetMap()->Instanceable())
                 continue;
-            PlayerbotAI* ai = GET_PLAYERBOT_AI(p);
-            if (!ai || ai->HasGameClientMaster() || !p->IsAlive())
-                continue;
-            ++count;
+            if (sRandomPlayerbotMgr.IsRandomBot(player) ||
+                const_cast<Manager*>(this)->IsConfiguredBotAccount(player->GetSession()->GetAccountId()))
+                ++count;
         }
+        _lastCensusTimeMs = now;
+        _cachedLiveBotCount = count;
         return count;
     }
 
@@ -1042,6 +1104,13 @@ namespace PvPLife
 
     void Manager::CalculatePopulation(Zone const& zone, uint32& attackerCount, uint32& defenderCount) const
     {
+        if (_draining)
+        {
+            attackerCount = 0;
+            defenderCount = 0;
+            return;
+        }
+
         uint32 minimumPopulation = std::clamp<uint32>(zone.PopulationMin, 1, _maxBotsPerSide * 2);
         uint32 maximumPopulation = std::clamp(zone.PopulationMax, minimumPopulation, _maxBotsPerSide * 2);
 
@@ -1054,14 +1123,35 @@ namespace PvPLife
             maximumPopulation = std::max<uint32>(minimumPopulation, static_cast<uint32>(std::lround(maximumPopulation * scale)));
         }
 
+        minimumPopulation = std::min(minimumPopulation, _maxBotsPerSide * 2);
+        maximumPopulation = std::clamp(maximumPopulation, minimumPopulation, _maxBotsPerSide * 2);
         uint32 totalPopulation = urand(minimumPopulation, maximumPopulation);
 
+        // DemandMode execution: Fixed, Dynamic, Hybrid
+        uint32 zoneId = zone.ZoneId ? zone.ZoneId : sMapMgr->GetZoneId(PHASEMASK_NORMAL, zone.MapId, zone.RallyX, zone.RallyY, zone.RallyZ);
+        if (_demandMode != DemandMode::Fixed && zoneId != 0)
+        {
+            uint32 nowSec = GameTimeSeconds();
+            bool hasRealPlayerPresence = false;
+            auto it = _zoneLastRealPlayerTime.find(zoneId);
+            if (it != _zoneLastRealPlayerTime.end() && (nowSec - it->second <= _burstGraceSeconds))
+                hasRealPlayerPresence = true;
+
+            if (_demandMode == DemandMode::Dynamic && !hasRealPlayerPresence)
+            {
+                attackerCount = 0;
+                defenderCount = 0;
+                return;
+            }
+            else if (_demandMode == DemandMode::Hybrid && !hasRealPlayerPresence)
+            {
+                float baselineFactor = static_cast<float>(_baselinePercent) / 100.0f;
+                totalPopulation = std::max<uint32>(2, static_cast<uint32>(std::lround(totalPopulation * baselineFactor)));
+            }
+        }
+
         uint32 budget = CalculatePopulationBudget();
-        uint32 currentActive = 0;
-        for (ActiveEvent const& e : _activeEvents)
-            currentActive += static_cast<uint32>(e.Members.size());
-        for (PendingRaidResponse const& r : _pendingResponses)
-            currentActive += static_cast<uint32>(r.Bots.size());
+        uint32 currentActive = PlayerbotsLife::GetCooperationSnapshot().PvPLifeCount;
 
         uint32 availableBudget = (budget > currentActive) ? (budget - currentActive) : 0;
         if (availableBudget < 2)
@@ -1232,9 +1322,196 @@ namespace PvPLife
 
         if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
         {
-            ai->ChangeEngine(BOT_STATE_COMBAT);
-            ai->GetAiObjectContext()->GetValue<Unit*>("current target")->Set(target);
         }
+    }
+
+    void Manager::DeployEventMembers(ActiveEvent& event, uint32& changesCount, uint32 maxChanges)
+    {
+        if (event.Closing || event.AdmissionRequestId != 0 || event.FullyPrepared)
+            return;
+        uint32 now = GameTimeSeconds();
+        auto deploy = [&](Participant& part, bool duelMode, uint32 index)
+        {
+            if (part.Deployed)
+                return true;
+            if (changesCount >= maxChanges)
+                return false;
+            Player* player = FindPlayer(part.Bot.GuidLow);
+            if (!IsOwnedActor(player, part, event.EventId))
+                return false;
+            part.OriginalMap = player->GetMapId();
+            part.OriginalX = player->GetPositionX();
+            part.OriginalY = player->GetPositionY();
+            part.OriginalZ = player->GetPositionZ();
+            part.OriginalO = player->GetOrientation();
+            CaptureAIState(player, part.Journal);
+            ApplyPvpStrategies(player, duelMode);
+            PlayerbotAI* ai = GET_PLAYERBOT_AI(player);
+            part.Journal.AppliedCombatStrategies = ai->GetStrategies(BOT_STATE_COMBAT);
+            part.Journal.AppliedNonCombatStrategies = ai->GetStrategies(BOT_STATE_NON_COMBAT);
+            part.Journal.AppliedPvPFlag = player->IsPvP();
+            if (sRandomPlayerbotMgr.IsRandomBot(player))
+                sRandomPlayerbotMgr.ScheduleTeleport(part.Bot.GuidLow, event.EndsAt - now + 60);
+            uint32 arrival = urand(_arrivalStaggerMin, _arrivalStaggerMax) + index;
+            part.Deployed = true;
+            ++changesCount;
+            ScheduleMove(event.EventId, part.Token, part.Bot.GuidLow, part.Bot.Name, event.EventZone.MapId,
+                part.ActivityX, part.ActivityY, part.ActivityZ, part.ActivityO, arrival, _teleportOnArrival);
+            if (!duelMode && part.Attacker)
+            {
+                uint32 moveDelay = arrival + urand(_moveAfterArrivalMin, _moveAfterArrivalMax);
+                ScheduleMove(event.EventId, part.Token, part.Bot.GuidLow, part.Bot.Name, event.EventZone.MapId,
+                    event.EventZone.TargetX + Jitter(), event.EventZone.TargetY + Jitter(),
+                    event.EventZone.TargetZ, event.EventZone.TargetO, moveDelay, _hardTeleportToTarget);
+                uint32 targetGuid = event.TriggerGuidLow;
+                if (event.Origin != EventOrigin::ReactiveRaidResponse)
+                    for (Participant const& target : event.Members)
+                        if (!target.Attacker)
+                        {
+                            targetGuid = target.Bot.GuidLow;
+                            break;
+                        }
+                if (_forceAttackOnEngage && targetGuid)
+                    ScheduleEngagement(event.EventId, part.Token, part.Bot.GuidLow, targetGuid,
+                        moveDelay + _engageAfterMoveSeconds);
+            }
+            return true;
+        };
+        if (event.EventZone.Type == ActivityType::Duel)
+        {
+            for (uint32 index = 0; index < event.DuelPairs.size(); ++index)
+            {
+                DuelPair& pair = event.DuelPairs[index];
+                if (pair.Deployed)
+                    continue;
+                auto a = std::find_if(event.Members.begin(), event.Members.end(),
+                    [&](Participant const& part) { return part.Bot.GuidLow == pair.ChallengerGuidLow; });
+                auto b = std::find_if(event.Members.begin(), event.Members.end(),
+                    [&](Participant const& part) { return part.Bot.GuidLow == pair.TargetGuidLow; });
+                if (a == event.Members.end() || b == event.Members.end())
+                    continue;
+                bool firstReady = deploy(*a, true, index);
+                bool secondReady = deploy(*b, true, index);
+                if (!firstReady || !secondReady)
+                    continue;
+                uint32 delay = _arrivalStaggerMax + index + _duelPairDelayMax;
+                ScheduleDuel(event.EventId, pair.PairId, a->Token, b->Token,
+                    a->Bot.GuidLow, b->Bot.GuidLow, a->Bot.Name, b->Bot.Name, delay);
+                pair.Deployed = true;
+            }
+        }
+        else
+            for (uint32 index = 0; index < event.Members.size(); ++index)
+                deploy(event.Members[index], false, index);
+        uint32 attackers = static_cast<uint32>(std::count_if(event.Members.begin(), event.Members.end(),
+            [](Participant const& part) { return part.Deployed && part.Attacker; }));
+        uint32 defenders = static_cast<uint32>(std::count_if(event.Members.begin(), event.Members.end(),
+            [](Participant const& part) { return part.Deployed && !part.Attacker; }));
+        if (attackers < event.RequiredAttackers || defenders < event.RequiredDefenders ||
+            attackers + defenders < event.MinimumTotal)
+            return;
+        if (std::all_of(event.Members.begin(), event.Members.end(),
+            [](Participant const& part) { return part.Deployed; }))
+        {
+            event.FullyPrepared = true;
+            event.StartedAt = now;
+            event.EndsAt = now + event.DurationSeconds;
+            if (event.EventZone.BotChat && _botChatEnable)
+                ScheduleEventChat(event);
+        }
+    }
+
+    void Manager::ProcessAdmissionGrants()
+    {
+        uint32 now = GameTimeSeconds();
+        for (ActiveEvent& event : _activeEvents)
+        {
+            if (!event.AdmissionRequestId || event.Closing)
+                continue;
+            if (event.PrepareDeadline <= now)
+            {
+                EndEvent(event, "admission-timeout");
+                continue;
+            }
+            std::vector<PlayerbotsLife::LeaseToken> tokens;
+            if (!PlayerbotsLife::TakeAdmissionGrant(event.AdmissionRequestId, PlayerbotsLife::ReservationOwner::PvPLife, tokens))
+                continue;
+            event.AdmissionRequestId = 0;
+            bool viable = tokens.size() == event.Members.size() &&
+                PlayerbotsLife::GetCooperationSnapshot().PvPLifeCount <= CalculatePopulationBudget();
+            for (Participant& part : event.Members)
+            {
+                auto token = std::find_if(tokens.begin(), tokens.end(),
+                    [&](PlayerbotsLife::LeaseToken const& lease) { return lease.GuidLow == part.Bot.GuidLow; });
+                if (token == tokens.end())
+                {
+                    viable = false;
+                    continue;
+                }
+                part.Token = *token;
+                if (!PlayerbotsLife::PromoteLease(part.Token))
+                    viable = false;
+            }
+            if (!viable)
+            {
+                EndEvent(event, "invalid-admission");
+                for (auto const& token : tokens)
+                    PlayerbotsLife::ReleaseLeaseExact(token);
+            }
+        }
+        for (PendingRaidResponse& pending : _pendingResponses)
+        {
+            if (!pending.AdmissionRequestId || pending.Cancelled)
+                continue;
+            std::vector<PlayerbotsLife::LeaseToken> tokens;
+            if (!PlayerbotsLife::TakeAdmissionGrant(pending.AdmissionRequestId, PlayerbotsLife::ReservationOwner::PvPLife, tokens))
+                continue;
+            pending.AdmissionRequestId = 0;
+            pending.LeasesGranted = tokens.size() == pending.Bots.size();
+            for (BotCandidate& bot : pending.Bots)
+            {
+                auto token = std::find_if(tokens.begin(), tokens.end(),
+                    [&](PlayerbotsLife::LeaseToken const& lease) { return lease.GuidLow == bot.GuidLow; });
+                if (token != tokens.end())
+                    bot.Token = *token;
+                else
+                    pending.LeasesGranted = false;
+            }
+            if (!pending.LeasesGranted || pending.Deadline <= now)
+            {
+                pending.Cancelled = true;
+                for (auto const& token : tokens)
+                    PlayerbotsLife::ReleaseLeaseExact(token);
+                continue;
+            }
+            for (uint32 guid : pending.PendingLoginGuids)
+            {
+                auto bot = std::find_if(pending.Bots.begin(), pending.Bots.end(),
+                    [guid](BotCandidate const& candidate) { return candidate.GuidLow == guid; });
+                if (bot != pending.Bots.end() &&
+                    PlayerbotsLife::ValidateLeaseState(bot->Token, PlayerbotsLife::LeaseState::Provisional))
+                    sRandomPlayerbotMgr.AddPlayerBot(ObjectGuid::Create<HighGuid::Player>(guid), 0);
+            }
+        }
+    }
+
+    void Manager::ProcessPreparingEvents()
+    {
+        uint32 now = GameTimeSeconds();
+        for (ActiveEvent& event : _activeEvents)
+        {
+            if (event.Closing || event.FullyPrepared || event.AdmissionRequestId != 0)
+                continue;
+            if (event.PrepareDeadline <= now)
+            {
+                EndEvent(event, "prep-timeout");
+                continue;
+            }
+            if (_changesThisTick < _maxChangesPerTick)
+                DeployEventMembers(event, _changesThisTick, _maxChangesPerTick);
+        }
+        _activeEvents.erase(std::remove_if(_activeEvents.begin(), _activeEvents.end(),
+            [](ActiveEvent const& event) { return event.Closing; }), _activeEvents.end());
     }
 
     bool Manager::StartZone(Zone const& zone, ChatHandler* handler, bool forced)
@@ -1251,6 +1528,9 @@ namespace PvPLife
         if (_maxActiveEvents > 0 && _activeEvents.size() >= _maxActiveEvents && !forced)
             return false;
 
+        if (!forced && _maxChangesPerTick > 0 && _changesThisTick >= _maxChangesPerTick)
+            return false;
+
         for (ActiveEvent const& e : _activeEvents)
             if (e.EventZone.Id == zone.Id)
                 return false;
@@ -1259,15 +1539,20 @@ namespace PvPLife
         for (ActiveEvent const& e : _activeEvents)
             for (Participant const& p : e.Members)
                 excluded.insert(p.Bot.GuidLow);
+        for (PendingRaidResponse const& r : _pendingResponses)
+            for (BotCandidate const& b : r.Bots)
+                excluded.insert(b.GuidLow);
+        for (ReleasingParticipant const& rp : _releasingParticipants)
+            excluded.insert(rp.Part.Bot.GuidLow);
 
         uint32 attackerNeed = 0;
         uint32 defenderNeed = 0;
         CalculatePopulation(zone, attackerNeed, defenderNeed);
         uint8 effMinLevel = EffectiveMinLevel(zone.MinLevel, zone.Type);
         std::vector<BotCandidate> attackerPool =
-            LoadCandidates(zone.AttackerTeam, effMinLevel, zone.MaxLevel, excluded);
+            LoadCandidates(zone.AttackerTeam, effMinLevel, zone.MaxLevel, excluded, attackerNeed);
         std::vector<BotCandidate> defenderPool =
-            LoadCandidates(zone.DefenderTeam, effMinLevel, zone.MaxLevel, excluded);
+            LoadCandidates(zone.DefenderTeam, effMinLevel, zone.MaxLevel, excluded, defenderNeed);
         std::unordered_set<uint32> attackerIds;
         std::unordered_set<uint32> defenderIds;
         for (BotCandidate const& bot : attackerPool)
@@ -1312,6 +1597,8 @@ namespace PvPLife
 
         uint32 requiredAttackers = _allowPartialTeams ? _minimumBotsPerSide : attackerNeed;
         uint32 requiredDefenders = _allowPartialTeams ? _minimumBotsPerSide : defenderNeed;
+        uint32 now = GameTimeSeconds();
+
         if (attackers.size() < requiredAttackers || defenders.size() < requiredDefenders ||
             (attackers.size() + defenders.size()) < _minOnlineRequired)
         {
@@ -1325,7 +1612,6 @@ namespace PvPLife
             return false;
         }
 
-        uint32 now = GameTimeSeconds();
         ActiveEvent event;
         event.EventId = _nextEventId++;
         event.EventZone = zone;
@@ -1333,7 +1619,19 @@ namespace PvPLife
         event.StartedAt = now;
         uint32 dmin = std::max<uint32>(1, zone.DurationMin);
         uint32 dmax = std::max(dmin, zone.DurationMax);
-        event.EndsAt = now + urand(dmin, dmax) * MINUTE;
+        event.DurationSeconds = urand(dmin, dmax) * MINUTE;
+        event.RequiredAttackers = requiredAttackers;
+        event.RequiredDefenders = requiredDefenders;
+        event.MinimumTotal = _minOnlineRequired;
+        uint32 plannedMembers = static_cast<uint32>(attackers.size() + defenders.size());
+        uint32 queuedWork = plannedMembers + static_cast<uint32>(_releasingParticipants.size());
+        for (ActiveEvent const& queued : _activeEvents)
+            if (!queued.Closing)
+                queuedWork += static_cast<uint32>(std::count_if(queued.Members.begin(), queued.Members.end(),
+                    [](Participant const& part) { return !part.Deployed; }));
+        uint32 batches = (queuedWork + _maxChangesPerTick - 1) / _maxChangesPerTick;
+        event.PrepareDeadline = now + std::max<uint32>(60, 2 * _tickSeconds * batches + _arrivalStaggerMax);
+        event.EndsAt = event.PrepareDeadline + event.DurationSeconds;
 
         // Rollback helper in case atomic batch acquisition does not satisfy minimums
         auto rollback = [&]()
@@ -1345,9 +1643,7 @@ namespace PvPLife
                 if (Player* p = FindPlayer(part.Bot.GuidLow))
                     RestoreAIState(p, part.Journal);
                 if (part.Token.GuidLow != 0)
-                    PlayerbotsLife::ReleaseLease(const_cast<PlayerbotsLife::LeaseToken&>(part.Token));
-                else
-                    ReleaseLifeBot(part.Bot.GuidLow);
+                    PlayerbotsLife::ReleaseLeaseExact(const_cast<PlayerbotsLife::LeaseToken&>(part.Token));
             }
             uint64 evId = event.EventId;
             _moveQueue.erase(std::remove_if(_moveQueue.begin(), _moveQueue.end(),
@@ -1381,15 +1677,6 @@ namespace PvPLife
 
                 Participant partA;
                 Participant partB;
-                if (!PlayerbotsLife::TryAcquireLease(partA.Token, candA.GuidLow, PlayerbotsLife::ReservationOwner::PvPLife, event.EventId, PlayerbotsLife::LeaseState::Active))
-                    continue;
-
-                if (!PlayerbotsLife::TryAcquireLease(partB.Token, candB.GuidLow, PlayerbotsLife::ReservationOwner::PvPLife, event.EventId, PlayerbotsLife::LeaseState::Active))
-                {
-                    PlayerbotsLife::ReleaseLease(partA.Token);
-                    continue;
-                }
-
                 uint64 pairId = _nextPairId++;
 
                 // Duel pair staging: allocate a single DuelStagingSlot per pair (PV-17)
@@ -1403,14 +1690,19 @@ namespace PvPLife
 
                 PlayerbotsLife::DuelStagingSlot slot;
                 uint32 slotId = 0;
-                if (PlayerbotsLife::ClaimDuelStagingSlot(zone.MapId, sx, sy, sz, 30.0f, event.EventId,
+                if (!PlayerbotsLife::ClaimDuelStagingSlot(zone.MapId, sx, sy, sz, 30.0f, event.EventId,
                     PlayerbotsLife::ReservationOwner::PvPLife, GameTimeMS(), eventDurationMs, slot, pairId))
                 {
-                    slotId = slot.SlotId;
-                    sx = slot.CenterX;
-                    sy = slot.CenterY;
-                    sz = slot.CenterZ;
+                    // Defer pair if staging slot unclaimable: never deploy at an unreserved fallback center!
+                    PlayerbotsLife::ReleaseLeaseExact(partA.Token);
+                    PlayerbotsLife::ReleaseLeaseExact(partB.Token);
+                    continue;
                 }
+
+                slotId = slot.SlotId;
+                sx = slot.CenterX;
+                sy = slot.CenterY;
+                sz = slot.CenterZ;
 
                 float baseAngle = zone.RallyO;
                 float offsetDist = 3.0f;
@@ -1435,8 +1727,7 @@ namespace PvPLife
                 partA.ActivityX = ax; partA.ActivityY = ay; partA.ActivityZ = az; partA.ActivityO = ao;
                 partA.PairId = pairId;
                 partA.DuelStagingSlotId = slotId;
-                CaptureAIState(playerA, partA.Journal);
-                ApplyPvpStrategies(playerA, true);
+                partA.Deployed = false;
 
                 // Setup Part B
                 partB.Bot = candB;
@@ -1449,8 +1740,7 @@ namespace PvPLife
                 partB.ActivityX = bx; partB.ActivityY = by; partB.ActivityZ = bz; partB.ActivityO = bo;
                 partB.PairId = pairId;
                 partB.DuelStagingSlotId = slotId;
-                CaptureAIState(playerB, partB.Journal);
-                ApplyPvpStrategies(playerB, true);
+                partB.Deployed = false;
 
                 event.Members.push_back(partA);
                 event.Members.push_back(partB);
@@ -1462,40 +1752,20 @@ namespace PvPLife
                 dp.TargetGuidLow = candB.GuidLow;
                 dp.StagingSlotId = slotId;
                 dp.State = DuelPairState::Approaching;
+                dp.Deployed = false;
                 event.DuelPairs.push_back(dp);
-
-                if (sRandomPlayerbotMgr.IsRandomBot(playerA))
-                    sRandomPlayerbotMgr.ScheduleTeleport(candA.GuidLow, event.EndsAt - now + 60);
-                if (sRandomPlayerbotMgr.IsRandomBot(playerB))
-                    sRandomPlayerbotMgr.ScheduleTeleport(candB.GuidLow, event.EndsAt - now + 60);
-
-                uint32 arrivalA = urand(_arrivalStaggerMin, _arrivalStaggerMax) + i;
-                uint32 arrivalB = urand(_arrivalStaggerMin, _arrivalStaggerMax) + i;
-                ScheduleMove(event.EventId, partA.Token, candA.GuidLow, candA.Name, zone.MapId, ax, ay, az, ao, arrivalA, _teleportOnArrival);
-                ScheduleMove(event.EventId, partB.Token, candB.GuidLow, candB.Name, zone.MapId, bx, by, bz, bo, arrivalB, _teleportOnArrival);
-
-                AuditLog("MEMBER", "event=" + std::to_string(event.EventId) + " side=attacker name=" + candA.Name +
-                    " guid=" + std::to_string(candA.GuidLow) + " lvl=" + std::to_string(candA.Level) + " class=" + std::to_string(candA.Class));
-                AuditLog("MEMBER", "event=" + std::to_string(event.EventId) + " side=defender name=" + candB.Name +
-                    " guid=" + std::to_string(candB.GuidLow) + " lvl=" + std::to_string(candB.Level) + " class=" + std::to_string(candB.Class));
-
-                uint32 duelDelay = std::max(arrivalA, arrivalB) + urand(_duelPairDelayMin, _duelPairDelayMax) + i * 2;
-                ScheduleDuel(event.EventId, pairId, partA.Token, partB.Token, candA.GuidLow, candB.GuidLow, candA.Name, candB.Name, duelDelay);
             }
             AuditLog("DUEL_QUEUE", "event=" + std::to_string(event.EventId) + " spot=" + zone.Name + " pairs=" + std::to_string(event.DuelPairs.size()));
         }
         else
         {
-            auto add = [&](BotCandidate const& bot, bool attacker, uint32 index)
+            auto add = [&](BotCandidate const& bot, bool attacker, uint32 /*index*/)
             {
                 Player* player = FindPlayer(bot.GuidLow);
                 if (!IsSafeBot(player))
                     return;
 
                 Participant part;
-                if (!PlayerbotsLife::TryAcquireLease(part.Token, bot.GuidLow, PlayerbotsLife::ReservationOwner::PvPLife, event.EventId, PlayerbotsLife::LeaseState::Active))
-                    return;
-
                 part.Bot = bot;
                 part.Attacker = attacker;
                 part.OriginalMap = player->GetMapId();
@@ -1504,10 +1774,6 @@ namespace PvPLife
                 part.OriginalZ = player->GetPositionZ();
                 part.OriginalO = player->GetOrientation();
 
-                CaptureAIState(player, part.Journal);
-                ApplyPvpStrategies(player, false);
-
-                uint32 arrival = urand(_arrivalStaggerMin, _arrivalStaggerMax) + index;
                 float sx = (attacker ? zone.RallyX : zone.TargetX) + Jitter();
                 float sy = (attacker ? zone.RallyY : zone.TargetY) + Jitter();
                 float sz = attacker ? zone.RallyZ : zone.TargetZ;
@@ -1517,28 +1783,8 @@ namespace PvPLife
                 part.ActivityY = sy;
                 part.ActivityZ = sz;
                 part.ActivityO = so;
+                part.Deployed = false;
                 event.Members.push_back(part);
-
-                if (sRandomPlayerbotMgr.IsRandomBot(player))
-                    sRandomPlayerbotMgr.ScheduleTeleport(bot.GuidLow, event.EndsAt - now + 60);
-
-                ScheduleMove(event.EventId, part.Token, bot.GuidLow, bot.Name, zone.MapId, sx, sy, sz, so, arrival, _teleportOnArrival);
-
-                AuditLog("MEMBER", "event=" + std::to_string(event.EventId) + " side=" + (attacker ? "attacker" : "defender") +
-                    " name=" + bot.Name + " guid=" + std::to_string(bot.GuidLow) + " lvl=" + std::to_string(bot.Level) + " class=" + std::to_string(bot.Class));
-
-                if (attacker)
-                {
-                    uint32 moveDelay = arrival + urand(_moveAfterArrivalMin, _moveAfterArrivalMax);
-                    ScheduleMove(event.EventId, part.Token, bot.GuidLow, bot.Name, zone.MapId,
-                        zone.TargetX + Jitter(), zone.TargetY + Jitter(), zone.TargetZ, zone.TargetO, moveDelay, _hardTeleportToTarget);
-
-                    if (_forceAttackOnEngage && !defenders.empty())
-                    {
-                        uint32 targetGuid = defenders[urand(0, static_cast<uint32>(defenders.size() - 1))].GuidLow;
-                        ScheduleEngagement(event.EventId, part.Token, bot.GuidLow, targetGuid, moveDelay + _engageAfterMoveSeconds);
-                    }
-                }
             };
 
             uint32 idx = 0;
@@ -1574,11 +1820,22 @@ namespace PvPLife
             return false;
         }
 
+        std::vector<uint32> admissionGuids;
+        for (Participant const& part : event.Members)
+            admissionGuids.push_back(part.Bot.GuidLow);
+        event.AdmissionRequestId = PlayerbotsLife::SubmitAdmissionRequest(
+            PlayerbotsLife::ReservationOwner::PvPLife, event.EventId, admissionGuids,
+            CalculatePopulationBudget(), now, event.PrepareDeadline);
+        if (!event.AdmissionRequestId)
+        {
+            rollback();
+            return false;
+        }
         _activeEvents.push_back(event);
         WorldDatabase.Execute("UPDATE pvp_life_zone SET last_start={} WHERE id={}", now, zone.Id);
-
-        if (zone.BotChat && _botChatEnable)
-            ScheduleEventChat(_activeEvents.back());
+        for (Zone& cached : _zoneCache)
+            if (cached.Id == zone.Id)
+                cached.LastStart = now;
 
         std::string label = std::string(TypeName(zone.Type)) + " at " + zone.Name;
         LOG_INFO("module", "[PvPLife] START #{} {} attackers={} defenders={} duration={}m",
@@ -1593,86 +1850,143 @@ namespace PvPLife
         if (_announce)
             Announce("[World PvP] " + label);
         if (handler)
-            handler->PSendSysMessage("PvP Life: #{} {} started (bots {} + {}).",
+            handler->PSendSysMessage("PvP Life: #{} {} queued for admission (bots {} + {}).",
                 event.EventId, label, actualAttackers, actualDefenders);
         return true;
     }
 
-    void Manager::EndEvent(ActiveEvent const& event, std::string const& reason)
+    void Manager::QueueParticipantRelease(Participant const& part, bool returnHome)
     {
-        LOG_INFO("module", "[PvPLife] END #{} {} reason={}", event.EventId, event.EventZone.Name, reason);
-        AuditLog("END", "event=" + std::to_string(event.EventId) + " spot=" + event.EventZone.Name +
-            " reason=" + reason + " members=" + std::to_string(event.Members.size()));
-
-        for (Participant const& part : event.Members)
+        if (!PlayerbotsLife::BeginRelease(part.Token))
+            return; // A stale record cannot clean another generation's actor.
+        if (!part.Deployed || !part.Journal.Captured)
         {
-            if (part.DuelStagingSlotId != 0)
-                PlayerbotsLife::ReleaseDuelStagingSlot(part.DuelStagingSlotId, PlayerbotsLife::ReservationOwner::PvPLife);
-
-            if (part.Token.GuidLow != 0)
-                PlayerbotsLife::BeginRelease(const_cast<PlayerbotsLife::LeaseToken&>(part.Token));
-            else
-                ReleaseLifeBot(part.Bot.GuidLow);
-
-            Player* p = FindPlayer(part.Bot.GuidLow);
-            if (p && p->GetSession() && !p->IsBeingTeleported())
-            {
-                CloseNativeDuel(p);
-                RestoreAIState(p, part.Journal);
-                if (sRandomPlayerbotMgr.IsRandomBot(p))
-                    sRandomPlayerbotMgr.ScheduleTeleport(part.Bot.GuidLow);
-                if (_returnBots && p->IsAlive())
-                {
-                    p->TeleportTo(part.OriginalMap, part.OriginalX, part.OriginalY, part.OriginalZ, part.OriginalO);
-                    AuditLog("RETURN", "event=" + std::to_string(event.EventId) + " player=" + part.Bot.Name + " map=" + std::to_string(part.OriginalMap));
-                }
-            }
-
-            if (part.Token.GuidLow != 0)
-                PlayerbotsLife::ReleaseLease(const_cast<PlayerbotsLife::LeaseToken&>(part.Token));
+            PlayerbotsLife::ReleaseLeaseExact(part.Token);
+            return;
         }
+        if (std::any_of(_releasingParticipants.begin(), _releasingParticipants.end(),
+            [&](ReleasingParticipant const& current) { return current.Part.Token.Generation == part.Token.Generation; }))
+            return;
+        ReleasingParticipant releasing;
+        releasing.Part = part;
+        releasing.ReturnHome = returnHome;
+        releasing.EnqueuedAt = GameTimeSeconds();
+        releasing.Deadline = releasing.EnqueuedAt + 60;
+        _releasingParticipants.push_back(releasing);
+    }
 
-        PlayerbotsLife::ReleaseDuelStagingSlotByActivity(event.EventId, PlayerbotsLife::ReservationOwner::PvPLife);
-
-        // Purge queued steps for this event (PV-05)
-        uint64 evId = event.EventId;
+    void Manager::EndEvent(ActiveEvent& event, std::string const& reason)
+    {
+        if (event.Closing)
+            return;
+        event.Closing = true; // Terminal before callbacks, queue purges, or cleanup.
+        if (event.AdmissionRequestId != 0)
+            PlayerbotsLife::CancelAdmissionRequest(event.AdmissionRequestId, PlayerbotsLife::ReservationOwner::PvPLife);
+        event.AdmissionRequestId = 0;
+        uint64 id = event.EventId;
         _moveQueue.erase(std::remove_if(_moveQueue.begin(), _moveQueue.end(),
-            [evId](MoveStep const& s) { return s.EventId == evId; }), _moveQueue.end());
+            [id](MoveStep const& step) { return step.EventId == id; }), _moveQueue.end());
         _duelQueue.erase(std::remove_if(_duelQueue.begin(), _duelQueue.end(),
-            [evId](DuelStep const& s) { return s.EventId == evId; }), _duelQueue.end());
+            [id](DuelStep const& step) { return step.EventId == id; }), _duelQueue.end());
         _engagementQueue.erase(std::remove_if(_engagementQueue.begin(), _engagementQueue.end(),
-            [evId](EngagementStep const& s) { return s.EventId == evId; }), _engagementQueue.end());
+            [id](EngagementStep const& step) { return step.EventId == id; }), _engagementQueue.end());
         _chatQueue.erase(std::remove_if(_chatQueue.begin(), _chatQueue.end(),
-            [evId](ChatStep const& s) { return s.EventId == evId; }), _chatQueue.end());
+            [id](ChatStep const& step) { return step.EventId == id; }), _chatQueue.end());
+        for (Participant const& part : event.Members)
+            QueueParticipantRelease(part, _returnBots);
+        for (DuelPair const& pair : event.DuelPairs)
+            if (!std::any_of(_releasingParticipants.begin(), _releasingParticipants.end(),
+                [&](ReleasingParticipant const& releasing) { return releasing.Part.DuelStagingSlotId == pair.StagingSlotId; }))
+                PlayerbotsLife::ReleaseDuelStagingSlot(pair.StagingSlotId, PlayerbotsLife::ReservationOwner::PvPLife);
+        LOG_INFO("module", "[PvPLife] END #{} {} reason={}", id, event.EventZone.Name, reason);
+        AuditLog("END", "event=" + std::to_string(id) + " reason=" + reason);
+    }
+
+    void Manager::ProcessReleasingParticipants()
+    {
+        auto it = _releasingParticipants.begin();
+        uint32 now = GameTimeSeconds();
+        auto releaseSlot = [&](Participant const& part)
+        {
+            if (part.DuelStagingSlotId && !std::any_of(_releasingParticipants.begin(), _releasingParticipants.end(),
+                [&](ReleasingParticipant const& other)
+                {
+                    return other.Part.Token.Generation != part.Token.Generation &&
+                        other.Part.DuelStagingSlotId == part.DuelStagingSlotId;
+                }))
+                PlayerbotsLife::ReleaseDuelStagingSlot(part.DuelStagingSlotId, PlayerbotsLife::ReservationOwner::PvPLife);
+        };
+        while (it != _releasingParticipants.end())
+        {
+            Participant const& part = it->Part;
+            if (!PlayerbotsLife::ValidateLeaseState(part.Token, PlayerbotsLife::LeaseState::Releasing))
+            {
+                releaseSlot(part);
+                it = _releasingParticipants.erase(it);
+                continue;
+            }
+            Player* player = FindPlayer(part.Bot.GuidLow);
+            if (!player || !player->GetSession() || IsHumanControlled(player))
+            {
+                PlayerbotsLife::ReleaseLeaseExact(part.Token);
+                releaseSlot(part);
+                it = _releasingParticipants.erase(it);
+                continue;
+            }
+            if (!player->IsInWorld() || player->IsBeingTeleported())
+            {
+                if (now >= it->Deadline)
+                {
+                    LOG_WARN("module", "[PvPLife] Cleanup of {} deferred: actor still transferring; lease retained.", part.Bot.GuidLow);
+                    it->Deadline = now + 60;
+                }
+                ++it;
+                continue;
+            }
+            if (_changesThisTick >= _maxChangesPerTick)
+            {
+                ++it;
+                continue;
+            }
+            CloseNativeDuel(player, part);
+            if (player->IsInCombat())
+            {
+                ++it;
+                continue;
+            }
+            RestoreAIState(player, part.Journal);
+            if (sRandomPlayerbotMgr.IsRandomBot(player))
+                sRandomPlayerbotMgr.ScheduleTeleport(part.Bot.GuidLow);
+            if (it->ReturnHome && player->IsAlive() && !player->IsInCombat())
+                player->TeleportTo(part.OriginalMap, part.OriginalX, part.OriginalY, part.OriginalZ, part.OriginalO);
+            ++_changesThisTick;
+            releaseSlot(part);
+            PlayerbotsLife::ReleaseLeaseExact(part.Token);
+            it = _releasingParticipants.erase(it);
+        }
     }
 
     void Manager::ExpireEvents()
     {
         uint32 now = GameTimeSeconds();
-        std::vector<ActiveEvent> keep;
-        for (ActiveEvent const& e : _activeEvents)
+        for (ActiveEvent& event : _activeEvents)
         {
-            bool lacksDuelPopulation = false;
-            if (e.EventZone.Type == ActivityType::Duel && e.StartedAt + 30 <= now)
+            if (event.Closing)
+                continue;
+            if (event.EndsAt <= now)
+                EndEvent(event, "timer");
+            else if (event.FullyPrepared && event.EventZone.Type == ActivityType::Duel)
             {
-                uint32 onlineMembers = 0;
-                for (Participant const& participant : e.Members)
-                {
-                    Player* player = FindPlayer(participant.Bot.GuidLow);
-                    if (player && player->IsInWorld() && player->IsAlive())
-                        ++onlineMembers;
-                }
-                lacksDuelPopulation = onlineMembers < 2;
+                uint32 alive = 0;
+                for (Participant const& part : event.Members)
+                    if (Player* player = FindPlayer(part.Bot.GuidLow); player && player->IsInWorld() && player->IsAlive())
+                        ++alive;
+                if (alive < 2)
+                    EndEvent(event, "duel-population");
             }
-
-            if (lacksDuelPopulation)
-                EndEvent(e, "duel-population");
-            else if (e.EndsAt <= now)
-                EndEvent(e, "timer");
-            else
-                keep.push_back(e);
         }
-        _activeEvents.swap(keep);
+        _activeEvents.erase(std::remove_if(_activeEvents.begin(), _activeEvents.end(),
+            [](ActiveEvent const& event) { return event.Closing; }), _activeEvents.end());
     }
 
     void Manager::ProcessMoveQueue()
@@ -1686,7 +2000,10 @@ namespace PvPLife
                 keep.push_back(step);
                 continue;
             }
-            if (!CanExecuteStep(step.EventId, step.Generation, step.GuidLow))
+            auto event = std::find_if(_activeEvents.begin(), _activeEvents.end(),
+                [&](ActiveEvent const& current) { return current.EventId == step.EventId; });
+            if (event == _activeEvents.end() || event->Closing || event->EndsAt <= now ||
+                !PlayerbotsLife::ValidateActiveLease(step.Token))
                 continue;
             Player* p = FindPlayer(step.GuidLow);
             if (!p || p->IsBeingTeleported())
@@ -1700,6 +2017,8 @@ namespace PvPLife
                 }
                 continue;
             }
+            if (!CanExecuteStep(step.EventId, step.Generation, step.GuidLow, true))
+                continue;
             MoveBot(p, step.MapId, step.X, step.Y, step.Z, step.O, step.Teleport);
             AuditLog("MOVE", "event=" + std::to_string(step.EventId) + " player=" + step.Name +
                 " guid=" + std::to_string(step.GuidLow) + " map=" + std::to_string(step.MapId) +
@@ -1718,6 +2037,14 @@ namespace PvPLife
         std::vector<EngagementStep> keep;
         for (EngagementStep const& step : _engagementQueue)
         {
+            auto preparing = std::find_if(_activeEvents.begin(), _activeEvents.end(),
+                [&](ActiveEvent const& event) { return event.EventId == step.EventId; });
+            if (preparing != _activeEvents.end() && !preparing->Closing && !preparing->FullyPrepared &&
+                preparing->PrepareDeadline > now)
+            {
+                keep.push_back(step);
+                continue;
+            }
             if (step.ExecuteAt > now)
             {
                 keep.push_back(step);
@@ -1751,6 +2078,14 @@ namespace PvPLife
         std::vector<DuelStep> keep;
         for (DuelStep const& step : _duelQueue)
         {
+            auto preparing = std::find_if(_activeEvents.begin(), _activeEvents.end(),
+                [&](ActiveEvent const& event) { return event.EventId == step.EventId; });
+            if (preparing != _activeEvents.end() && !preparing->Closing && !preparing->FullyPrepared &&
+                preparing->PrepareDeadline > now)
+            {
+                keep.push_back(step);
+                continue;
+            }
             if (step.ExecuteAt > now)
             {
                 keep.push_back(step);
@@ -1843,6 +2178,7 @@ namespace PvPLife
                         continue;
                     }
                 }
+                RememberDuelIdentity(step.EventId, challenger, target);
                 if (step.TargetIsRealPlayer)
                 {
                     _botChallengeCooldown[step.ChallengerGuidLow] = now + _botChallengeCooldownSeconds;
@@ -1937,6 +2273,7 @@ namespace PvPLife
                 fail("Duel spell cast failed", result);
                 continue;
             }
+            RememberDuelIdentity(step.EventId, challenger, target);
             DuelStep waiting = step;
             waiting.RequestSent = true;
             waiting.RequestDeadline = now + DuelRequestTimeout;
@@ -1948,32 +2285,24 @@ namespace PvPLife
 
     std::string Manager::RandomChatLine(ActivityType type, ChatChannel channel, TeamSide speakerTeam)
     {
-        QueryResult result = WorldDatabase.Query(
-            "SELECT text,weight FROM pvp_life_chat WHERE enabled=1 AND activity_type={} AND channel={} AND (speaker_team={} OR speaker_team=2) ORDER BY id",
-            static_cast<uint32>(type), static_cast<uint32>(channel), static_cast<uint32>(speakerTeam));
-        if (!result)
+        uint64 total = 0;
+        for (CachedChatLine const& line : _chatCache)
+            if (line.Type == type && line.Channel == channel &&
+                (line.Team == speakerTeam || line.Team == TeamSide::Any))
+                total += line.Weight;
+        if (!total)
             return {};
-
-        struct Entry { std::string Text; uint32 Weight; };
-        std::vector<Entry> entries;
-        uint32 total = 0;
-        do
-        {
-            Field* f = result->Fetch();
-            Entry e{ f[0].Get<std::string>(), std::max<uint32>(1, f[1].Get<uint32>()) };
-            total += e.Weight;
-            entries.push_back(e);
-        } while (result->NextRow());
-
-        uint32 roll = urand(1, total);
-        uint32 cursor = 0;
-        for (Entry const& e : entries)
-        {
-            cursor += e.Weight;
-            if (roll <= cursor)
-                return e.Text;
-        }
-        return entries.empty() ? std::string() : entries.front().Text;
+        uint64 roll = static_cast<uint64>(frand(0.0f, 1.0f) * total);
+        roll = std::min(roll, total - 1);
+        for (CachedChatLine const& line : _chatCache)
+            if (line.Type == type && line.Channel == channel &&
+                (line.Team == speakerTeam || line.Team == TeamSide::Any))
+            {
+                if (roll < line.Weight)
+                    return line.Text;
+                roll -= line.Weight;
+            }
+        return {};
     }
 
     void Manager::ScheduleEventChat(ActiveEvent const& event)
@@ -2032,6 +2361,14 @@ namespace PvPLife
         std::vector<ChatStep> keep;
         for (ChatStep const& step : _chatQueue)
         {
+            auto preparing = std::find_if(_activeEvents.begin(), _activeEvents.end(),
+                [&](ActiveEvent const& event) { return event.EventId == step.EventId; });
+            if (preparing != _activeEvents.end() && !preparing->Closing && !preparing->FullyPrepared &&
+                preparing->PrepareDeadline > now)
+            {
+                keep.push_back(step);
+                continue;
+            }
             if (step.ExecuteAt > now)
             {
                 keep.push_back(step);
@@ -2068,7 +2405,7 @@ namespace PvPLife
 
         for (ActiveEvent const& event : _activeEvents)
         {
-            if (event.EventZone.Type != ActivityType::Duel)
+            if (event.Closing || !event.FullyPrepared || event.EventZone.Type != ActivityType::Duel)
                 continue;
 
             float centerX = (event.EventZone.RallyX + event.EventZone.TargetX) * 0.5f;
@@ -2077,7 +2414,7 @@ namespace PvPLife
             std::vector<uint32> available;
             for (Participant const& participant : event.Members)
             {
-                if (participant.Token.GuidLow != 0 && !PlayerbotsLife::ValidateLease(participant.Token))
+                if (!participant.Deployed || !PlayerbotsLife::ValidateActiveLease(participant.Token))
                     continue;
 
                 uint32 guidLow = participant.Bot.GuidLow;
@@ -2085,6 +2422,8 @@ namespace PvPLife
                     continue;
 
                 Player* bot = FindPlayer(guidLow);
+                if (IsHumanControlled(bot))
+                    continue;
                 if (!bot || !bot->IsAlive() || bot->IsBeingTeleported() || bot->duel || bot->IsInCombat())
                     continue;
 
@@ -2180,15 +2519,17 @@ namespace PvPLife
     {
         for (ActiveEvent const& event : _activeEvents)
         {
-            if (event.EventZone.Type != ActivityType::Duel)
+            if (event.Closing || !event.FullyPrepared || event.EventZone.Type != ActivityType::Duel)
                 continue;
 
             for (Participant const& participant : event.Members)
             {
-                if (participant.Token.GuidLow != 0 && !PlayerbotsLife::ValidateLease(participant.Token))
+                if (!participant.Deployed || !PlayerbotsLife::ValidateActiveLease(participant.Token))
                     continue;
 
                 Player* bot = FindPlayer(participant.Bot.GuidLow);
+                if (IsHumanControlled(bot))
+                    continue;
                 if (!bot || !bot->IsAlive() || bot->IsBeingTeleported())
                     continue;
 
@@ -2244,7 +2585,7 @@ namespace PvPLife
 
         for (ActiveEvent const& event : _activeEvents)
         {
-            if (event.EventZone.Type != ActivityType::Duel || !event.EventZone.ChallengePlayers)
+            if (event.Closing || !event.FullyPrepared || event.EventZone.Type != ActivityType::Duel || !event.EventZone.ChallengePlayers)
                 continue;
 
             struct RealPlayerTarget
@@ -2291,10 +2632,12 @@ namespace PvPLife
 
             for (Participant const& participant : event.Members)
             {
-                if (participant.Token.GuidLow != 0 && !PlayerbotsLife::ValidateLease(participant.Token))
+                if (!participant.Deployed || !PlayerbotsLife::ValidateActiveLease(participant.Token))
                     continue;
 
                 Player* bot = FindPlayer(participant.Bot.GuidLow);
+                if (IsHumanControlled(bot))
+                    continue;
                 if (!bot || bot->duel || bot->IsInCombat() || bot->IsBeingTeleported())
                     continue;
                 auto botCd = _botChallengeCooldown.find(participant.Bot.GuidLow);
@@ -2592,11 +2935,7 @@ namespace PvPLife
             return;
 
         uint32 budget = CalculatePopulationBudget();
-        uint32 currentActive = 0;
-        for (ActiveEvent const& event : _activeEvents)
-            currentActive += static_cast<uint32>(event.Members.size());
-        for (PendingRaidResponse const& r : _pendingResponses)
-            currentActive += static_cast<uint32>(r.Bots.size());
+        uint32 currentActive = PlayerbotsLife::GetCooperationSnapshot().PvPLifeCount;
 
         uint32 availableBudget = (budget > currentActive) ? (budget - currentActive) : 0;
         if (availableBudget < 2)
@@ -2612,6 +2951,8 @@ namespace PvPLife
         for (PendingRaidResponse const& r : _pendingResponses)
             for (BotCandidate const& b : r.Bots)
                 excluded.insert(b.GuidLow);
+        for (ReleasingParticipant const& rp : _releasingParticipants)
+            excluded.insert(rp.Part.Bot.GuidLow);
 
         uint8 minLvl = target->Level;
         uint8 maxLvl = 80;
@@ -2626,7 +2967,7 @@ namespace PvPLife
             maxLvl = static_cast<uint8>(std::min<int32>(80, static_cast<int32>(target->Level) + _reactiveMaxLevelDifference));
         }
 
-        std::vector<BotCandidate> responders = LoadCandidates(target->ResponseTeam, minLvl, maxLvl, excluded);
+        std::vector<BotCandidate> responders = LoadCandidates(target->ResponseTeam, minLvl, maxLvl, excluded, desired);
         if (responders.size() > desired)
             responders.resize(desired);
         for (BotCandidate const& bot : responders)
@@ -2636,6 +2977,8 @@ namespace PvPLife
         if (responders.size() < desired && _reactiveLoginOfflineBots)
         {
             std::vector<BotCandidate> offline = LoadOfflineCandidates(target->ResponseTeam, minLvl, excluded);
+            if (!_offlineCandidateCache.count(minLvl))
+                return; // Re-evaluate the raid after the asynchronous snapshot is available.
             uint32 need = desired - static_cast<uint32>(responders.size());
             need = std::min<uint32>(need, _reactiveMaxConcurrentLogins);
             if (offline.size() > need)
@@ -2650,25 +2993,6 @@ namespace PvPLife
         if (responders.empty())
             return;
 
-        // Reserve provisional responders BEFORE calling AddPlayerBot so they cannot be leased by others (PV-14)
-        std::vector<BotCandidate> leasedResponders;
-        for (BotCandidate& b : responders)
-        {
-            if (PlayerbotsLife::TryAcquireLease(b.Token, b.GuidLow, PlayerbotsLife::ReservationOwner::PvPLife, 0, PlayerbotsLife::LeaseState::Provisional))
-                leasedResponders.push_back(b);
-        }
-
-        if (leasedResponders.empty())
-            return;
-
-        for (uint32 loginGuid : pendingLogins)
-        {
-            auto it = std::find_if(leasedResponders.begin(), leasedResponders.end(),
-                [loginGuid](BotCandidate const& b) { return b.GuidLow == loginGuid; });
-            if (it != leasedResponders.end())
-                sRandomPlayerbotMgr.AddPlayerBot(ObjectGuid::Create<HighGuid::Player>(loginGuid), 0);
-        }
-
         PendingRaidResponse pending;
         pending.ResponseId = _nextResponseId++;
         pending.TriggerGuidLow = target->GuidLow;
@@ -2681,9 +3005,17 @@ namespace PvPLife
         pending.StartAt = now + _reactiveLoginDelaySeconds;
         pending.Deadline = now + _reactiveLoginTimeoutSeconds;
         pending.State = ResponseState::Reserved;
-        pending.Bots = std::move(leasedResponders);
+        pending.Bots = std::move(responders);
         pending.PendingLoginGuids = std::move(pendingLogins);
 
+        std::vector<uint32> admissionGuids;
+        for (BotCandidate const& bot : pending.Bots)
+            admissionGuids.push_back(bot.GuidLow);
+        pending.AdmissionRequestId = PlayerbotsLife::SubmitAdmissionRequest(
+            PlayerbotsLife::ReservationOwner::PvPLife, (uint64(1) << 63) | pending.ResponseId,
+            admissionGuids, budget, now, pending.Deadline);
+        if (!pending.AdmissionRequestId)
+            return;
         _pendingResponses.push_back(std::move(pending));
         _lastReactiveResponse = now;
 
@@ -2698,19 +3030,20 @@ namespace PvPLife
     {
         for (auto& pending : _pendingResponses)
         {
-            if (pending.ResponseId == responseId && !pending.Cancelled)
+            if ((responseId == 0 || pending.ResponseId == responseId) && !pending.Cancelled)
             {
-                LOG_INFO("module", "[PvPLife] Cancelled pending raid response #{} (reason: {})", responseId, reason);
+                LOG_INFO("module", "[PvPLife] Cancelled pending raid response #{} (reason: {})", pending.ResponseId, reason);
                 for (BotCandidate const& b : pending.Bots)
                 {
                     if (b.Token.GuidLow != 0)
-                        PlayerbotsLife::ReleaseLease(const_cast<PlayerbotsLife::LeaseToken&>(b.Token));
-                    else
-                        ReleaseLifeBot(b.GuidLow);
+                        PlayerbotsLife::ReleaseLeaseExact(const_cast<PlayerbotsLife::LeaseToken&>(b.Token));
                 }
+                if (pending.AdmissionRequestId)
+                    PlayerbotsLife::CancelAdmissionRequest(pending.AdmissionRequestId, PlayerbotsLife::ReservationOwner::PvPLife);
                 pending.Bots.clear();
                 pending.Cancelled = true;
-                break;
+                if (responseId != 0)
+                    break;
             }
         }
         _pendingResponses.erase(std::remove_if(_pendingResponses.begin(), _pendingResponses.end(),
@@ -2720,62 +3053,33 @@ namespace PvPLife
     void Manager::StartPendingRaidResponses()
     {
         uint32 now = GameTimeSeconds();
-        std::vector<PendingRaidResponse> keep;
-
         for (PendingRaidResponse& pending : _pendingResponses)
         {
             if (pending.Cancelled)
-            {
-                for (BotCandidate const& b : pending.Bots)
-                {
-                    if (b.Token.GuidLow != 0)
-                        PlayerbotsLife::ReleaseLease(const_cast<PlayerbotsLife::LeaseToken&>(b.Token));
-                    else
-                        ReleaseLifeBot(b.GuidLow);
-                }
                 continue;
-            }
-
-            if (pending.StartAt > now)
-            {
-                keep.push_back(pending);
-                continue;
-            }
-
-            // If offline bots were requested to log in and haven't all logged in yet, wait until deadline (PV-14)
-            if (!pending.PendingLoginGuids.empty() && now < pending.Deadline)
-            {
-                bool allOnline = true;
-                for (uint32 g : pending.PendingLoginGuids)
-                {
-                    Player* p = FindPlayer(g);
-                    if (!p || !p->IsInWorld())
-                    {
-                        allOnline = false;
-                        break;
-                    }
-                }
-                if (!allOnline)
-                {
-                    keep.push_back(pending);
-                    continue;
-                }
-            }
-
             Player* leader = FindPlayer(pending.TriggerGuidLow);
-            if (!leader || !leader->IsInWorld() || leader->GetMapId() != pending.MapId || !leader->IsAlive())
+            Group* group = leader ? leader->GetGroup() : nullptr;
+            bool validTrigger = leader && IsRealPlayer(leader) && leader->IsInWorld() && leader->IsAlive() &&
+                leader->IsPvP() && leader->GetMapId() == pending.MapId && group &&
+                group->IsLeader(leader->GetGUID()) && group->GetMembersCount() >= _reactiveMinGroupSize;
+            if (!validTrigger || pending.Deadline <= now)
             {
-                LOG_INFO("module", "[PvPLife] Cancelled pending raid response #{} (reason: leader vanished or map changed)", pending.ResponseId);
-                for (BotCandidate const& b : pending.Bots)
-                {
-                    if (b.Token.GuidLow != 0)
-                        PlayerbotsLife::ReleaseLease(const_cast<PlayerbotsLife::LeaseToken&>(b.Token));
-                    else
-                        ReleaseLifeBot(b.GuidLow);
-                }
+                if (pending.AdmissionRequestId)
+                    PlayerbotsLife::CancelAdmissionRequest(pending.AdmissionRequestId, PlayerbotsLife::ReservationOwner::PvPLife);
+                for (BotCandidate const& bot : pending.Bots)
+                    PlayerbotsLife::ReleaseLeaseExact(bot.Token);
+                pending.Cancelled = true;
                 continue;
             }
-
+            if (!pending.LeasesGranted || pending.StartAt > now)
+                continue;
+            bool online = std::all_of(pending.Bots.begin(), pending.Bots.end(), [&](BotCandidate const& bot)
+            {
+                Player* player = FindPlayer(bot.GuidLow);
+                return player && player->IsInWorld() && !player->IsBeingTeleported();
+            });
+            if (!online)
+                continue;
             ActiveEvent event;
             event.EventId = _nextEventId++;
             event.Origin = EventOrigin::ReactiveRaidResponse;
@@ -2783,80 +3087,55 @@ namespace PvPLife
             event.EventZone.Name = "Reactive Defense (" + std::string(TeamName(pending.ResponseTeam)) + ")";
             event.EventZone.MapId = pending.MapId;
             event.EventZone.Type = ActivityType::Skirmish;
-            event.EventZone.AttackerTeam = pending.ResponseTeam;
-            event.EventZone.DefenderTeam = (pending.ResponseTeam == TeamSide::Alliance) ? TeamSide::Horde : TeamSide::Alliance;
-            event.StartedAt = now;
-            event.EndsAt = now + _reactiveDurationMinutes * MINUTE;
-
+            event.EventZone.TargetX = pending.TargetX;
+            event.EventZone.TargetY = pending.TargetY;
+            event.EventZone.TargetZ = pending.TargetZ;
+            event.EventZone.TargetO = pending.TargetO;
+            event.DurationSeconds = _reactiveDurationMinutes * MINUTE;
+            uint32 queuedWork = static_cast<uint32>(pending.Bots.size() + _releasingParticipants.size());
+            for (ActiveEvent const& queued : _activeEvents)
+                if (!queued.Closing)
+                    queuedWork += static_cast<uint32>(std::count_if(queued.Members.begin(), queued.Members.end(),
+                        [](Participant const& part) { return !part.Deployed; }));
+            uint32 batches = (queuedWork + _maxChangesPerTick - 1) / _maxChangesPerTick;
+            event.PrepareDeadline = now + std::max<uint32>(60, 2 * _tickSeconds * batches + _arrivalStaggerMax);
+            event.EndsAt = event.PrepareDeadline + event.DurationSeconds;
+            event.MinimumTotal = 1;
             float angle = pending.TargetO + 3.14159265f;
             uint32 index = 0;
-            for (BotCandidate bot : pending.Bots)
+            for (BotCandidate const& bot : pending.Bots)
             {
                 Player* player = FindPlayer(bot.GuidLow);
-                if (!IsSafeBot(player, true))
+                if (!IsSafeBot(player, true) || IsHumanControlled(player))
                 {
-                    if (bot.Token.GuidLow != 0)
-                        PlayerbotsLife::ReleaseLease(bot.Token);
-                    else
-                        ReleaseLifeBot(bot.GuidLow);
+                    PlayerbotsLife::ReleaseLeaseExact(bot.Token);
                     continue;
                 }
-
-                bot.Online = true;
                 Participant part;
                 part.Bot = bot;
                 part.Attacker = true;
-                part.OriginalMap = player->GetMapId();
-                part.OriginalX = player->GetPositionX();
-                part.OriginalY = player->GetPositionY();
-                part.OriginalZ = player->GetPositionZ();
-                part.OriginalO = player->GetOrientation();
                 part.Token = bot.Token;
-
                 if (!PlayerbotsLife::PromoteLease(part.Token, event.EventId))
                 {
-                    if (bot.Token.GuidLow != 0)
-                        PlayerbotsLife::ReleaseLease(bot.Token);
-                    else
-                        ReleaseLifeBot(bot.GuidLow);
+                    PlayerbotsLife::ReleaseLeaseExact(bot.Token);
                     continue;
                 }
-
-                CaptureAIState(player, part.Journal);
-                ApplyPvpStrategies(player, false);
-                event.Members.push_back(part);
-
                 float lane = static_cast<float>(static_cast<int32>(index % _reactiveFormationColumns) -
                     static_cast<int32>(_reactiveFormationColumns / 2)) * _reactiveLaneSpacing;
-                float rallyX = pending.TargetX + std::cos(angle) * _reactiveRallyDistance - std::sin(angle) * lane;
-                float rallyY = pending.TargetY + std::sin(angle) * _reactiveRallyDistance + std::cos(angle) * lane;
-                MoveBot(player, pending.MapId, rallyX, rallyY, pending.TargetZ, angle, _teleportOnArrival);
-
-                float targetAdvanceX = pending.TargetX + std::cos(angle) * _reactiveAdvanceDistance + Jitter();
-                float targetAdvanceY = pending.TargetY + std::sin(angle) * _reactiveAdvanceDistance + Jitter();
-
-                ScheduleMove(event.EventId, part.Token, bot.GuidLow, bot.Name, pending.MapId,
-                    targetAdvanceX, targetAdvanceY, pending.TargetZ, pending.TargetO,
-                    _moveAfterArrivalMin, _hardTeleportToTarget);
-
-                if (_forceAttackOnEngage)
-                    ScheduleEngagement(event.EventId, part.Token, bot.GuidLow, pending.TriggerGuidLow,
-                        _moveAfterArrivalMin + _engageAfterMoveSeconds);
-
+                part.ActivityX = pending.TargetX + std::cos(angle) * _reactiveRallyDistance - std::sin(angle) * lane;
+                part.ActivityY = pending.TargetY + std::sin(angle) * _reactiveRallyDistance + std::cos(angle) * lane;
+                part.ActivityZ = pending.TargetZ;
+                part.ActivityO = angle;
+                event.Members.push_back(part);
                 ++index;
             }
-
+            pending.Bots.clear();
+            pending.Cancelled = true;
             if (!event.Members.empty())
-            {
-                LOG_INFO("module", "[PvPLife] REACTIVE EVENT #{} START responders={}",
-                    event.EventId, event.Members.size());
-                AuditLog("REACTIVE_START", "event=" + std::to_string(event.EventId) +
-                    " trigger=" + std::to_string(pending.TriggerGuidLow) +
-                    " team=" + TeamName(pending.ResponseTeam) + " responders=" + std::to_string(event.Members.size()));
-                _activeEvents.push_back(event);
-            }
+                _activeEvents.push_back(std::move(event));
         }
-        _pendingResponses.swap(keep);
+        _pendingResponses.erase(std::remove_if(_pendingResponses.begin(), _pendingResponses.end(),
+            [](PendingRaidResponse const& pending) { return pending.Cancelled; }), _pendingResponses.end());
     }
 
     void Manager::Announce(std::string const& text) const
@@ -2868,28 +3147,32 @@ namespace PvPLife
 
     void Manager::Update(uint32 diff)
     {
-        if (!_enable)
+        bool managementTick = _timerMs <= diff;
+        if (managementTick)
+        {
+            _timerMs = _tickSeconds * IN_MILLISECONDS;
+            _changesThisTick = 0;
+        }
+        else
+            _timerMs -= diff;
+        _transactionProcessor.ProcessReadyCallbacks();
+        _queryProcessor.ProcessReadyCallbacks();
+        PlayerbotsLife::ResolveAdmissionRequests(GameTimeSeconds());
+        ProcessReleasingParticipants(); // Works while disabled, reloading, or DB-unavailable.
+        if (!_enable || !_databaseReady || _draining)
             return;
-
         if (_startupElapsedMs < _startupDelaySeconds * IN_MILLISECONDS)
         {
             _startupElapsedMs += diff;
-            if (!_startupDelayLogged)
-            {
-                _startupDelayLogged = true;
-                LOG_INFO("module", "[PvPLife] Startup delay active for {} seconds so Playerbots can finish logging in.",
-                    _startupDelaySeconds);
-            }
             return;
         }
-
-        ExpireEvents();
+        ExpireEvents(); // Reject expired work before any movement or combat operation.
+        ProcessAdmissionGrants();
+        StartPendingRaidResponses();
         ProcessMoveQueue();
         ProcessDuelQueue();
         ProcessEngagementQueue();
         ProcessChatQueue();
-        StartPendingRaidResponses();
-
         if (_duelGuardTimerMs <= diff)
         {
             _duelGuardTimerMs = _duelGuardIntervalMs;
@@ -2897,10 +3180,9 @@ namespace PvPLife
         }
         else
             _duelGuardTimerMs -= diff;
-
-        if (_timerMs <= diff)
+        if (managementTick)
         {
-            _timerMs = _tickSeconds * IN_MILLISECONDS;
+            ProcessPreparingEvents();
             TryQueueReactiveRaidResponse();
             MaintainPersistentDuelZones();
             MaintainPersistentWorldPvp();
@@ -2909,8 +3191,6 @@ namespace PvPLife
             MaintainBotDuels();
             ProcessRealPlayerChallenges();
         }
-        else
-            _timerMs -= diff;
     }
 
     void Manager::PrintStatus(ChatHandler* handler) const
@@ -3032,7 +3312,8 @@ namespace PvPLife
         handler->PSendSysMessage("PvPLife:  {}", pvpActive ? "|cff00ff00ACTIVE|r" : "|cffff0000INACTIVE|r");
         handler->PSendSysMessage("Artisans: {}", artActive ? "|cff00ff00ACTIVE|r" : "|cffff0000INACTIVE|r");
 
-        handler->PSendSysMessage("Anti-Stealing Harmony: {}", _harmonyEnable ? "ENABLED" : "DISABLED");
+        handler->PSendSysMessage("Exact ownership protection: ALWAYS ENABLED (legacy harmony setting={})", _harmonyEnable);
+        handler->PSendSysMessage("Admission is automatic; accounts and existing assignments are not partitioned.");
         handler->PSendSysMessage("Respect Reservations:  {}", _respectCityLifeReservations ? "ENABLED" : "DISABLED");
         handler->PSendSysMessage("Exclude CL Accounts:   {}", _excludeCityLifeAccounts ? "ENABLED" : "DISABLED");
         handler->PSendSysMessage("Hooks Pass-Through:    {}", _independentHookProcessing ? "ENABLED" : "DISABLED");
@@ -3042,25 +3323,12 @@ namespace PvPLife
 
     void Manager::PrintReservations(ChatHandler* handler) const
     {
-        PlayerbotsLife::ReservationRegistry& reg = PlayerbotsLife::GetReservationRegistry();
-        std::lock_guard<std::mutex> lock(reg.Mutex);
-
-        uint32 clCount = 0;
-        uint32 pvpCount = 0;
-        uint32 artCount = 0;
-
-        for (auto const& pair : reg.Owners)
-        {
-            if (pair.second == PlayerbotsLife::ReservationOwner::CityLife)
-                ++clCount;
-            else if (pair.second == PlayerbotsLife::ReservationOwner::PvPLife)
-                ++pvpCount;
-            else if (pair.second == PlayerbotsLife::ReservationOwner::Artisans)
-                ++artCount;
-        }
-
+        auto snapshot = PlayerbotsLife::GetCooperationSnapshot();
         handler->PSendSysMessage("Total Reserved Bots: {} (CityLife: {}, PvPLife: {}, Artisans: {})",
-            reg.Owners.size(), clCount, pvpCount, artCount);
+            snapshot.TotalReserved, snapshot.CityLifeCount, snapshot.PvPLifeCount, snapshot.ArtisansCount);
+        handler->PSendSysMessage("Admission requests={} unacknowledged grants={} releasing actors={} work used={}/{}",
+            snapshot.WaitingAdmissions, snapshot.UnacknowledgedGrants, _releasingParticipants.size(),
+            _changesThisTick, _maxChangesPerTick);
     }
 
     void Manager::PrintDebugStatus(ChatHandler* handler) const
@@ -3143,6 +3411,31 @@ namespace PvPLife
         return true;
     }
 
+    void Manager::QueueZoneMutation(std::string const& sql)
+    {
+        if (_pendingZoneWrites >= 32)
+        {
+            LOG_WARN("module", "[PvPLife] Zone write queue is full; GM edit was not submitted.");
+            return;
+        }
+        WorldDatabaseTransaction transaction = WorldDatabase.BeginTransaction();
+        transaction->Append(sql);
+        ++_pendingZoneWrites;
+        uint64 generation = _dataGeneration;
+        _transactionProcessor.AddCallback(WorldDatabase.AsyncCommitTransaction(transaction)).AfterComplete(
+            [this, generation](bool success)
+            {
+                --_pendingZoneWrites;
+                if (!success)
+                {
+                    LOG_ERROR("module", "[PvPLife] Zone edit transaction failed; cached zones remain unchanged.");
+                    return;
+                }
+                if (generation == _dataGeneration)
+                    LoadZoneConfig(); // Refresh only after this write has committed.
+            });
+    }
+
     bool Manager::HandleZoneCommand(ChatHandler* handler, std::vector<std::string> const& args)
     {
         if (args.size() < 2)
@@ -3151,6 +3444,11 @@ namespace PvPLife
             return true;
         }
         std::string action = Lower(args[1]);
+        if (action != "list" && _pendingZoneWrites >= 32)
+        {
+            handler->PSendSysMessage("PvP Life: Zone edit queue is full; retry after pending writes finish.");
+            return true;
+        }
         if (action == "list")
         {
             QueryResult result = WorldDatabase.Query(ZoneSelectSql("ORDER BY activity_type,name").c_str());
@@ -3201,15 +3499,15 @@ namespace PvPLife
             }
             uint32 minLevel = std::clamp<uint32>(minLevelRaw, 1, 80);
             uint32 maxLevel = std::clamp<uint32>(maxLevelRaw, minLevel, 80);
-            WorldDatabase.Execute(
+            QueueZoneMutation(Acore::StringFormat(
                 "INSERT INTO pvp_life_zone (name,enabled,activity_type,attacker_team,defender_team,min_level,max_level,map_id,"
                 "rally_x,rally_y,rally_z,rally_o,target_x,target_y,target_z,target_o) VALUES ('{}',1,{},{},{},{},{},{},{},{},{},{},{},{},{},{}) "
                 "ON DUPLICATE KEY UPDATE activity_type=VALUES(activity_type),attacker_team=VALUES(attacker_team),defender_team=VALUES(defender_team),"
                 "min_level=VALUES(min_level),max_level=VALUES(max_level)",
                 name, static_cast<uint32>(type), static_cast<uint32>(attacker), static_cast<uint32>(defender), minLevel, maxLevel,
                 gm->GetMapId(), gm->GetPositionX(), gm->GetPositionY(), gm->GetPositionZ(), gm->GetOrientation(),
-                gm->GetPositionX(), gm->GetPositionY(), gm->GetPositionZ(), gm->GetOrientation());
-            handler->PSendSysMessage("PvP Life: Created/updated {}. Now set rally and target positions.", args[2]);
+                gm->GetPositionX(), gm->GetPositionY(), gm->GetPositionZ(), gm->GetOrientation()));
+            handler->PSendSysMessage("PvP Life: Queued creation/update of {}. Set rally and target after it appears in zone list.", args[2]);
             return true;
         }
         if ((action == "rally" || action == "target") && args.size() >= 3)
@@ -3224,15 +3522,15 @@ namespace PvPLife
             WorldDatabase.EscapeString(name);
             if (action == "rally")
             {
-                WorldDatabase.Execute("UPDATE pvp_life_zone SET map_id={},rally_x={},rally_y={},rally_z={},rally_o={} WHERE name='{}'",
-                    gm->GetMapId(), gm->GetPositionX(), gm->GetPositionY(), gm->GetPositionZ(), gm->GetOrientation(), name);
+                QueueZoneMutation(Acore::StringFormat("UPDATE pvp_life_zone SET map_id={},rally_x={},rally_y={},rally_z={},rally_o={} WHERE name='{}'",
+                    gm->GetMapId(), gm->GetPositionX(), gm->GetPositionY(), gm->GetPositionZ(), gm->GetOrientation(), name));
             }
             else
             {
-                WorldDatabase.Execute("UPDATE pvp_life_zone SET map_id={},target_x={},target_y={},target_z={},target_o={} WHERE name='{}'",
-                    gm->GetMapId(), gm->GetPositionX(), gm->GetPositionY(), gm->GetPositionZ(), gm->GetOrientation(), name);
+                QueueZoneMutation(Acore::StringFormat("UPDATE pvp_life_zone SET map_id={},target_x={},target_y={},target_z={},target_o={} WHERE name='{}'",
+                    gm->GetMapId(), gm->GetPositionX(), gm->GetPositionY(), gm->GetPositionZ(), gm->GetOrientation(), name));
             }
-            handler->PSendSysMessage("PvP Life: Saved {} position for {}.", action, args[2]);
+            handler->PSendSysMessage("PvP Life: Queued {} position update for {}.", action, args[2]);
             return true;
         }
         if (action == "counts" && args.size() >= 7)
@@ -3245,9 +3543,9 @@ namespace PvPLife
                 handler->PSendSysMessage("Invalid count values.");
                 return true;
             }
-            WorldDatabase.Execute("UPDATE pvp_life_zone SET attackers_min={},attackers_max={},defenders_min={},defenders_max={} WHERE name='{}'",
-                attMin, attMax, defMin, defMax, name);
-            handler->PSendSysMessage("PvP Life: Updated counts for {}.", args[2]);
+            QueueZoneMutation(Acore::StringFormat("UPDATE pvp_life_zone SET attackers_min={},attackers_max={},defenders_min={},defenders_max={} WHERE name='{}'",
+                attMin, attMax, defMin, defMax, name));
+            handler->PSendSysMessage("PvP Life: Queued counts update for {}.", args[2]);
             return true;
         }
         if (action == "duration" && args.size() >= 5)
@@ -3259,9 +3557,9 @@ namespace PvPLife
                 handler->PSendSysMessage("Invalid duration values.");
                 return true;
             }
-            WorldDatabase.Execute("UPDATE pvp_life_zone SET duration_min={},duration_max={} WHERE name='{}'",
-                durMin, durMax, name);
-            handler->PSendSysMessage("PvP Life: Updated duration for {}.", args[2]);
+            QueueZoneMutation(Acore::StringFormat("UPDATE pvp_life_zone SET duration_min={},duration_max={} WHERE name='{}'",
+                durMin, durMax, name));
+            handler->PSendSysMessage("PvP Life: Queued duration update for {}.", args[2]);
             return true;
         }
         if ((action == "weight" || action == "cooldown" || action == "challenge" || action == "chat" || action == "enable") && args.size() >= 4)
@@ -3274,16 +3572,16 @@ namespace PvPLife
                 return true;
             }
             if (action == "weight")
-                WorldDatabase.Execute("UPDATE pvp_life_zone SET weight={} WHERE name='{}'", value, name);
+                QueueZoneMutation(Acore::StringFormat("UPDATE pvp_life_zone SET weight={} WHERE name='{}'", value, name));
             else if (action == "cooldown")
-                WorldDatabase.Execute("UPDATE pvp_life_zone SET cooldown_seconds={} WHERE name='{}'", value, name);
+                QueueZoneMutation(Acore::StringFormat("UPDATE pvp_life_zone SET cooldown_seconds={} WHERE name='{}'", value, name));
             else if (action == "challenge")
-                WorldDatabase.Execute("UPDATE pvp_life_zone SET challenge_players={} WHERE name='{}'", value ? 1 : 0, name);
+                QueueZoneMutation(Acore::StringFormat("UPDATE pvp_life_zone SET challenge_players={} WHERE name='{}'", value ? 1 : 0, name));
             else if (action == "chat")
-                WorldDatabase.Execute("UPDATE pvp_life_zone SET bot_chat={} WHERE name='{}'", value ? 1 : 0, name);
+                QueueZoneMutation(Acore::StringFormat("UPDATE pvp_life_zone SET bot_chat={} WHERE name='{}'", value ? 1 : 0, name));
             else
-                WorldDatabase.Execute("UPDATE pvp_life_zone SET enabled={} WHERE name='{}'", value ? 1 : 0, name);
-            handler->PSendSysMessage("PvP Life: Updated {} for {}.", action, args[2]);
+                QueueZoneMutation(Acore::StringFormat("UPDATE pvp_life_zone SET enabled={} WHERE name='{}'", value ? 1 : 0, name));
+            handler->PSendSysMessage("PvP Life: Queued {} update for {}.", action, args[2]);
             return true;
         }
         PrintHelp(handler);
@@ -3357,23 +3655,7 @@ namespace PvPLife
         {
             if (Lower(args[2]) == "all")
             {
-                for (PendingRaidResponse& p : _pendingResponses)
-                {
-                    if (!p.Cancelled)
-                    {
-                        LOG_INFO("module", "[PvPLife] Cancelled pending raid response #{} (reason: gm-stop-all)", p.ResponseId);
-                        for (BotCandidate const& b : p.Bots)
-                        {
-                            if (b.Token.GuidLow != 0)
-                                PlayerbotsLife::ReleaseLease(const_cast<PlayerbotsLife::LeaseToken&>(b.Token));
-                            else
-                                ReleaseLifeBot(b.GuidLow);
-                        }
-                        p.Bots.clear();
-                        p.Cancelled = true;
-                    }
-                }
-                _pendingResponses.clear();
+                CancelPendingRaidResponse(0, "gm-stop-all");
                 handler->PSendSysMessage("PvP Life: Stopped all pending raid responses.");
                 return true;
             }
@@ -3442,13 +3724,16 @@ namespace PvPLife
     {
         if (id == 0)
         {
-            for (ActiveEvent const& e : _activeEvents)
+            _draining = true;
+            CancelPendingRaidResponse(0, "gm-stop");
+            for (ActiveEvent& e : _activeEvents)
                 EndEvent(e, "gm-stop");
             _activeEvents.clear();
             _moveQueue.clear();
             _duelQueue.clear();
             _engagementQueue.clear();
             _chatQueue.clear();
+            _draining = false;
             if (handler)
                 handler->PSendSysMessage("PvP Life: Stopped all activities.");
             return;
@@ -3456,7 +3741,7 @@ namespace PvPLife
 
         bool found = false;
         std::vector<ActiveEvent> keep;
-        for (ActiveEvent const& e : _activeEvents)
+        for (ActiveEvent& e : _activeEvents)
         {
             if (e.EventId == id)
             {
