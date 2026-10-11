@@ -115,8 +115,8 @@ namespace PvPLife
 
     struct AIStateJournal
     {
-        std::string CombatStrategies;
-        std::string NonCombatStrategies;
+        std::vector<std::string> CombatStrategies;
+        std::vector<std::string> NonCombatStrategies;
         bool OriginalPvPFlag = false;
         bool HadStayPosition = false;
         float StayX = 0.0f;

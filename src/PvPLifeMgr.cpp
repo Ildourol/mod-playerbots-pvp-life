@@ -673,8 +673,8 @@ namespace PvPLife
         journal.OriginalPvPFlag = player->IsPvP();
         if (PlayerbotAI* ai = GET_PLAYERBOT_AI(player))
         {
-            journal.CombatStrategies = ai->GetCombatStrategies();
-            journal.NonCombatStrategies = ai->GetNonCombatStrategies();
+            journal.CombatStrategies = ai->GetStrategies(BOT_STATE_COMBAT);
+            journal.NonCombatStrategies = ai->GetStrategies(BOT_STATE_NON_COMBAT);
             PositionMap& positions = ai->GetAiObjectContext()->GetValue<PositionMap&>("position")->Get();
             PositionInfo stay = positions["stay"];
             journal.HadStayPosition = stay.isSet();
@@ -710,9 +710,17 @@ namespace PvPLife
         if (PlayerbotAI* ai = GET_PLAYERBOT_AI(player))
         {
             if (!journal.CombatStrategies.empty())
-                ai->SetCombatStrategies(journal.CombatStrategies);
+            {
+                ai->ClearStrategies(BOT_STATE_COMBAT);
+                for (std::string const& s : journal.CombatStrategies)
+                    ai->ChangeStrategy("+" + s, BOT_STATE_COMBAT);
+            }
             if (!journal.NonCombatStrategies.empty())
-                ai->SetNonCombatStrategies(journal.NonCombatStrategies);
+            {
+                ai->ClearStrategies(BOT_STATE_NON_COMBAT);
+                for (std::string const& s : journal.NonCombatStrategies)
+                    ai->ChangeStrategy("+" + s, BOT_STATE_NON_COMBAT);
+            }
 
             PositionMap& positions = ai->GetAiObjectContext()->GetValue<PositionMap&>("position")->Get();
             PositionInfo stay = positions["stay"];
@@ -1205,7 +1213,7 @@ namespace PvPLife
         if (bot->GetMapId() != target->GetMapId())
             return;
 
-        if (!bot->CanAttack(target))
+        if (!bot->IsValidAttackTarget(target))
             return;
 
         AreaTableEntry const* botArea = sAreaTableStore.LookupEntry(bot->GetAreaId());
@@ -1219,8 +1227,14 @@ namespace PvPLife
         if (_strategiesEnable)
             ApplyPvpStrategies(bot, false);
 
+        bot->SetSelection(target->GetGUID());
+        bot->Attack(target, true);
+
         if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
-            ai->Attack(target);
+        {
+            ai->ChangeEngine(BOT_STATE_COMBAT);
+            ai->GetAiObjectContext()->GetValue<Unit*>("current target")->Set(target);
+        }
     }
 
     bool Manager::StartZone(Zone const& zone, ChatHandler* handler, bool forced)
