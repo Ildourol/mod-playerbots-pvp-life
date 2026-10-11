@@ -589,7 +589,7 @@ namespace PvPLife
     {
         if (!player || !player->GetSession())
             return false;
-        return ::IsRealPlayer(player);
+        return ::IsRealPlayer(const_cast<Player*>(player));
     }
 
     bool Manager::IsSafeBot(Player* player, bool allowPvPLifeReservation) const
