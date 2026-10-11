@@ -384,6 +384,12 @@ namespace PvPLife
         _offlineCandidateQueries.clear();
         if (!_botChatEnable)
             _chatQueue.clear();
+        if (_botChatYellChance == 0)
+            _chatQueue.erase(std::remove_if(_chatQueue.begin(), _chatQueue.end(),
+                [](ChatStep const& s) { return s.Channel == ChatChannel::Yell; }), _chatQueue.end());
+        if (_botChatWorldChance == 0)
+            _chatQueue.erase(std::remove_if(_chatQueue.begin(), _chatQueue.end(),
+                [](ChatStep const& s) { return s.Channel == ChatChannel::World; }), _chatQueue.end());
         for (ActiveEvent& event : _activeEvents)
             if ((event.EventZone.Type == ActivityType::Duel && !_duelEnable) ||
                 (event.EventZone.Type == ActivityType::ForTheHorde && !_forTheHordeEnable) ||
@@ -1200,8 +1206,15 @@ namespace PvPLife
         {
             if (PlayerbotAI* ai = GET_PLAYERBOT_AI(player))
             {
-                ai->ChangeStrategy(_pvpCombatStrategies, BOT_STATE_COMBAT);
-                ai->ChangeStrategy(duelMode ? _duelNonCombatStrategies : _pvpNonCombatStrategies, BOT_STATE_NON_COMBAT);
+                std::string combatStrats = _pvpCombatStrategies;
+                std::string nonCombatStrats = duelMode ? _duelNonCombatStrategies : _pvpNonCombatStrategies;
+                if (!_botChatEnable || _botChatYellChance == 0)
+                {
+                    combatStrats += ",-chat,-emote";
+                    nonCombatStrats += ",-chat,-emote";
+                }
+                ai->ChangeStrategy(combatStrats, BOT_STATE_COMBAT);
+                ai->ChangeStrategy(nonCombatStrats, BOT_STATE_NON_COMBAT);
                 if (duelMode)
                     ai->ChangeStrategy("+stay,-follow,-passive,-grind", BOT_STATE_NON_COMBAT);
             }
@@ -2307,6 +2320,10 @@ namespace PvPLife
 
     void Manager::ScheduleEventChat(ActiveEvent const& event)
     {
+        if (!_botChatEnable || !event.EventZone.BotChat)
+            return;
+        if (_botChatYellChance == 0 && _botChatWorldChance == 0)
+            return;
         if (event.EventZone.Type != ActivityType::ForTheHorde && event.EventZone.Type != ActivityType::ForTheAlliance)
             return;
 
@@ -2319,7 +2336,7 @@ namespace PvPLife
 
         TeamSide team = event.EventZone.DefenderTeam;
         uint32 base = _arrivalStaggerMax + 8;
-        if (urand(1, 100) <= _botChatYellChance)
+        if (_botChatYellChance > 0 && urand(1, 100) <= _botChatYellChance)
         {
             std::string line = RandomChatLine(event.EventZone.Type, ChatChannel::Yell, team);
             if (!line.empty())
@@ -2336,7 +2353,7 @@ namespace PvPLife
                 _chatQueue.push_back(step);
             }
         }
-        if (urand(1, 100) <= _botChatWorldChance)
+        if (_botChatWorldChance > 0 && urand(1, 100) <= _botChatWorldChance)
         {
             std::string line = RandomChatLine(event.EventZone.Type, ChatChannel::World, team);
             if (!line.empty())
@@ -2357,10 +2374,22 @@ namespace PvPLife
 
     void Manager::ProcessChatQueue()
     {
+        if (!_botChatEnable)
+        {
+            if (!_chatQueue.empty())
+                _chatQueue.clear();
+            return;
+        }
+
         uint32 now = GameTimeSeconds();
         std::vector<ChatStep> keep;
         for (ChatStep const& step : _chatQueue)
         {
+            if (step.Channel == ChatChannel::Yell && _botChatYellChance == 0)
+                continue;
+            if (step.Channel == ChatChannel::World && _botChatWorldChance == 0)
+                continue;
+
             auto preparing = std::find_if(_activeEvents.begin(), _activeEvents.end(),
                 [&](ActiveEvent const& event) { return event.EventId == step.EventId; });
             if (preparing != _activeEvents.end() && !preparing->Closing && !preparing->FullyPrepared &&
@@ -2383,9 +2412,15 @@ namespace PvPLife
             if (!ai)
                 continue;
             if (step.Channel == ChatChannel::Yell)
-                ai->Yell(step.Text);
+            {
+                if (_botChatYellChance > 0)
+                    ai->Yell(step.Text);
+            }
             else
-                ai->SayToWorld(step.Text);
+            {
+                if (_botChatWorldChance > 0)
+                    ai->SayToWorld(step.Text);
+            }
         }
         _chatQueue.swap(keep);
     }
@@ -3087,6 +3122,7 @@ namespace PvPLife
             event.EventZone.Name = "Reactive Defense (" + std::string(TeamName(pending.ResponseTeam)) + ")";
             event.EventZone.MapId = pending.MapId;
             event.EventZone.Type = ActivityType::Skirmish;
+            event.EventZone.BotChat = _botChatEnable;
             event.EventZone.TargetX = pending.TargetX;
             event.EventZone.TargetY = pending.TargetY;
             event.EventZone.TargetZ = pending.TargetZ;
