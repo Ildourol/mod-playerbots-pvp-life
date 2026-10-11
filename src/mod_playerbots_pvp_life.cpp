@@ -6,6 +6,7 @@
 
 #include "PvPLifeMgr.h"
 #include "LifeBotReservation.h"
+#include "LifeTelemetryBridge.h"
 
 #include "Chat.h"
 #include "CommandScript.h"
@@ -125,10 +126,15 @@ public:
 
 void AddPvPLifeScripts()
 {
+    static_assert(PlayerbotsLife::LIFE_BOT_RESERVATION_PROTOCOL_VERSION == 2026101104,
+        "PvP Life requires LifeBotReservation protocol version 2026101104");
+
     PlayerbotsLife::RegisterActiveModule(PlayerbotsLife::MODULE_PVP_LIFE);
+    PlayerbotsLife::RegisterTelemetryBridge();
     new PvPLifeWorldScript();
     new PvPLifePlayerScript();
     new PvPLifeGroupScript();
     new PvPLifeCommandScript();
-    LOG_INFO("server.loading", ">> Loaded mod-playerbots-pvp-life");
+    LOG_INFO("server.loading", ">> Loaded mod-playerbots-pvp-life (protocol={}, registry={:p})",
+        PlayerbotsLife::GetReservationProtocolVersion(), PlayerbotsLife::GetReservationRegistryAddress());
 }

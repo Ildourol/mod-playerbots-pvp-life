@@ -47,8 +47,8 @@ CREATE TABLE IF NOT EXISTS `pvp_life_chat` (
   KEY `idx_pvp_life_chat_pick` (`enabled`,`activity_type`,`channel`,`speaker_team`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Seed data for PvP Life zones (idempotent upsert)
-INSERT INTO `pvp_life_zone`
+-- Seed data for PvP Life zones (idempotent insert)
+INSERT IGNORE INTO `pvp_life_zone`
 (`name`,`enabled`,`activity_type`,`attacker_team`,`defender_team`,`min_level`,`max_level`,`map_id`,
  `rally_x`,`rally_y`,`rally_z`,`rally_o`,`target_x`,`target_y`,`target_z`,`target_o`,
  `attackers_min`,`attackers_max`,`defenders_min`,`defenders_max`,`duration_min`,`duration_max`,`weight`,`cooldown_seconds`,`last_start`,`challenge_players`,`bot_chat`)
@@ -93,31 +93,7 @@ VALUES
 ('Kargath',1,0,0,1,35,50,0, -6700,-2400,240,0, -6650,-2200,245,0, 2,5,2,5, 6,14, 70, 2400, 0, 0, 0),
 ('SearingGorge',0,0,2,2,45,55,0, -6500,-1200,180,0, -6550,-1150,180,0, 3,8,3,8, 8,18, 80, 2400, 0, 0, 0),
 ('BlackrockMountain',0,0,2,2,50,60,0, -7500,-1100,270,0, -7550,-1250,270,0, 4,10,4,10, 10,25, 100, 2400, 0, 0, 0),
-('LightHopeChapel',0,0,1,0,55,60,0, 2250,-5300,85,0, 2280,-5310,85,0, 4,10,4,10, 10,25, 90, 3600, 0, 0, 0)
-ON DUPLICATE KEY UPDATE
-  `enabled`=VALUES(`enabled`),
-  `activity_type`=VALUES(`activity_type`),
-  `attacker_team`=VALUES(`attacker_team`),
-  `defender_team`=VALUES(`defender_team`),
-  `min_level`=VALUES(`min_level`),
-  `max_level`=VALUES(`max_level`),
-  `map_id`=VALUES(`map_id`),
-  `rally_x`=VALUES(`rally_x`),
-  `rally_y`=VALUES(`rally_y`),
-  `rally_z`=VALUES(`rally_z`),
-  `rally_o`=VALUES(`rally_o`),
-  `target_x`=VALUES(`target_x`),
-  `target_y`=VALUES(`target_y`),
-  `target_z`=VALUES(`target_z`),
-  `target_o`=VALUES(`target_o`),
-  `attackers_min`=VALUES(`attackers_min`),
-  `attackers_max`=VALUES(`attackers_max`),
-  `defenders_min`=VALUES(`defenders_min`),
-  `defenders_max`=VALUES(`defenders_max`),
-  `duration_min`=VALUES(`duration_min`),
-  `duration_max`=VALUES(`duration_max`),
-  `weight`=VALUES(`weight`),
-  `cooldown_seconds`=VALUES(`cooldown_seconds`);
+('LightHopeChapel',0,0,1,0,55,60,0, 2250,-5300,85,0, 2280,-5310,85,0, 4,10,4,10, 10,25, 90, 3600, 0, 0, 0);
 
 -- Seed chatter for faction capital battles (non-destructive insert if absent)
 INSERT INTO `pvp_life_chat` (`enabled`,`activity_type`,`channel`,`speaker_team`,`text`,`weight`)
@@ -151,25 +127,8 @@ WHERE NOT EXISTS (
     AND c.text = tmp.text
 );
 
--- Compatibility GM Commands for .wpvp
-DELETE FROM `command` WHERE `name` IN (
-  'wpvp',
-  'wpvp help',
-  'wpvp status',
-  'wpvp scan',
-  'wpvp start',
-  'wpvp stop',
-  'wpvp spot',
-  'wpvp spot list',
-  'wpvp spot create',
-  'wpvp spot rally',
-  'wpvp spot target',
-  'wpvp spot counts',
-  'wpvp spot duration',
-  'wpvp spot enable'
-);
-
-INSERT INTO `command` (`name`, `security`, `help`) VALUES
+-- Compatibility GM Commands for .wpvp (non-destructive insert if absent)
+INSERT IGNORE INTO `command` (`name`, `security`, `help`) VALUES
 ('wpvp', 3, 'Syntax: .wpvp help\nPlayerbot World PvP GM commands (PvP Life Compatibility).'),
 ('wpvp help', 3, 'Syntax: .wpvp help\nShows Playerbot World PvP commands.'),
 ('wpvp status', 3, 'Syntax: .wpvp status\nShows active world-PvP events.'),

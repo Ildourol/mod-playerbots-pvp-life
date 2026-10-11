@@ -20,7 +20,7 @@
 
 namespace PlayerbotsLife
 {
-    constexpr std::uint32_t LIFE_BOT_RESERVATION_PROTOCOL_VERSION = 2026101103;
+    constexpr std::uint32_t LIFE_BOT_RESERVATION_PROTOCOL_VERSION = 2026101104;
 
     enum class ReservationOwner : std::uint8_t
     {
@@ -53,6 +53,8 @@ namespace PlayerbotsLife
         std::uint64_t AssignmentId = 0;
         std::uint64_t Generation = 0;
         LeaseState State = LeaseState::Provisional;
+        bool IsLegacy = false;
+        std::uint32_t StateTimestampSec = 0;
     };
 
     struct DuelStagingSlot
@@ -81,6 +83,10 @@ namespace PlayerbotsLife
         std::uint32_t WaitingAdmissions = 0;
         std::uint32_t UnacknowledgedGrants = 0;
         std::uint64_t CurrentGeneration = 0;
+        std::uint32_t StaleProvisionalCount = 0;
+        std::uint32_t StaleReleasingCount = 0;
+        std::uint32_t OldestProvisionalAgeSec = 0;
+        std::uint32_t OldestReleasingAgeSec = 0;
     };
 
     struct AdmissionRequest
@@ -118,12 +124,23 @@ namespace PlayerbotsLife
         ReservationOwner CurrentPriorityOwner{ReservationOwner::CityLife};
         std::vector<AdmissionRequest> PendingAdmissionRequests;
         std::vector<AdmissionGrant> RecentAdmissionGrants;
+        std::atomic<bool> TelemetryBridgeRegistered{false};
     };
 
     inline ReservationRegistry& GetReservationRegistry()
     {
         static ReservationRegistry registry;
         return registry;
+    }
+
+    inline void const* GetReservationRegistryAddress()
+    {
+        return static_cast<void const*>(&GetReservationRegistry());
+    }
+
+    constexpr std::uint32_t GetReservationProtocolVersion()
+    {
+        return LIFE_BOT_RESERVATION_PROTOCOL_VERSION;
     }
 
     inline void RegisterActiveModule(ModuleSystemFlags flag)
@@ -155,13 +172,16 @@ namespace PlayerbotsLife
 
     inline bool TryAcquireLease(LeaseToken& outToken, std::uint32_t guidLow, ReservationOwner owner,
                                 std::uint64_t activityId, LeaseState initialState = LeaseState::Active,
-                                std::uint64_t assignmentId = 0)
+                                std::uint64_t assignmentId = 0, bool isLegacy = false, std::uint32_t nowSec = 0)
     {
         ReservationRegistry& registry = GetReservationRegistry();
         std::lock_guard<std::mutex> lock(registry.Mutex);
 
         if (registry.Owners.find(guidLow) != registry.Owners.end())
             return false;
+
+        if (nowSec == 0)
+            nowSec = static_cast<std::uint32_t>(std::time(nullptr));
 
         std::uint64_t gen = ++registry.NextGeneration;
         outToken.GuidLow = guidLow;
@@ -170,6 +190,8 @@ namespace PlayerbotsLife
         outToken.AssignmentId = assignmentId;
         outToken.Generation = gen;
         outToken.State = initialState;
+        outToken.IsLegacy = isLegacy;
+        outToken.StateTimestampSec = nowSec;
 
         registry.Owners[guidLow] = owner;
         registry.Leases[guidLow] = outToken;
@@ -177,7 +199,8 @@ namespace PlayerbotsLife
     }
 
     inline bool TryAcquireBatch(std::vector<LeaseToken>& outTokens, std::vector<std::uint32_t> const& guids,
-                                ReservationOwner owner, std::uint64_t activityId, std::uint64_t assignmentId = 0)
+                                ReservationOwner owner, std::uint64_t activityId, std::uint64_t assignmentId = 0,
+                                std::uint32_t nowSec = 0)
     {
         if (guids.empty())
         {
@@ -198,6 +221,9 @@ namespace PlayerbotsLife
                 return false;
         }
 
+        if (nowSec == 0)
+            nowSec = static_cast<std::uint32_t>(std::time(nullptr));
+
         outTokens.clear();
         outTokens.reserve(guids.size());
         for (std::uint32_t guidLow : guids)
@@ -210,6 +236,8 @@ namespace PlayerbotsLife
             token.AssignmentId = assignmentId;
             token.Generation = gen;
             token.State = LeaseState::Active;
+            token.IsLegacy = false;
+            token.StateTimestampSec = nowSec;
 
             registry.Owners[guidLow] = owner;
             registry.Leases[guidLow] = token;
@@ -248,14 +276,17 @@ namespace PlayerbotsLife
         return ValidateLeaseState(token, LeaseState::Active);
     }
 
-    inline bool BeginRelease(LeaseToken const& token)
+    inline bool BeginRelease(LeaseToken const& token, std::uint32_t nowSec = 0)
     {
         ReservationRegistry& registry = GetReservationRegistry();
         std::lock_guard<std::mutex> lock(registry.Mutex);
         auto it = registry.Leases.find(token.GuidLow);
         if (it == registry.Leases.end() || !MatchesLease(it->second, token))
             return false;
+        if (nowSec == 0)
+            nowSec = static_cast<std::uint32_t>(std::time(nullptr));
         it->second.State = LeaseState::Releasing;
+        it->second.StateTimestampSec = nowSec;
         return true;
     }
 
@@ -276,7 +307,7 @@ namespace PlayerbotsLife
         ReleaseLeaseExact(token);
     }
 
-    inline bool PromoteLease(LeaseToken& token, std::uint64_t newActivityId = 0)
+    inline bool PromoteLease(LeaseToken& token, std::uint64_t newActivityId = 0, std::uint32_t nowSec = 0)
     {
         ReservationRegistry& registry = GetReservationRegistry();
         std::lock_guard<std::mutex> lock(registry.Mutex);
@@ -284,7 +315,10 @@ namespace PlayerbotsLife
         if (it == registry.Leases.end() || !MatchesLease(it->second, token) ||
             (it->second.State != LeaseState::Provisional && it->second.State != LeaseState::Active))
             return false;
+        if (nowSec == 0)
+            nowSec = static_cast<std::uint32_t>(std::time(nullptr));
         it->second.State = LeaseState::Active;
+        it->second.StateTimestampSec = nowSec;
         if (newActivityId != 0)
             it->second.ActivityId = newActivityId;
         token = it->second;
@@ -307,7 +341,7 @@ namespace PlayerbotsLife
         auto& slots = registry.ActiveDuelSlots;
         for (auto it = slots.begin(); it != slots.end();)
         {
-            if (it->ExpiryTimeMs != 0 && it->ExpiryTimeMs <= nowMs)
+            if (it->ExpiryTimeMs != 0 && static_cast<std::int32_t>(nowMs - it->ExpiryTimeMs) >= 0)
                 it = slots.erase(it);
             else
                 ++it;
@@ -447,6 +481,25 @@ namespace PlayerbotsLife
     // Shared Real Player Challenge Cooldown Ledger
     // -------------------------------------------------------------
 
+    constexpr std::size_t MAX_REAL_PLAYER_COOLDOWNS = 1024;
+
+    inline void PruneRealPlayerCooldowns(std::uint32_t nowSec = 0)
+    {
+        if (nowSec == 0)
+            nowSec = static_cast<std::uint32_t>(std::time(nullptr));
+
+        ReservationRegistry& registry = GetReservationRegistry();
+        std::lock_guard<std::mutex> lock(registry.Mutex);
+
+        for (auto it = registry.RealPlayerCooldowns.begin(); it != registry.RealPlayerCooldowns.end();)
+        {
+            if (nowSec >= it->second)
+                it = registry.RealPlayerCooldowns.erase(it);
+            else
+                ++it;
+        }
+    }
+
     inline bool CanChallengeRealPlayer(std::uint32_t playerGuidLow, std::uint32_t nowSec, std::uint32_t cooldownSec = 0)
     {
         (void)cooldownSec;
@@ -457,6 +510,56 @@ namespace PlayerbotsLife
         if (it == registry.RealPlayerCooldowns.end() || nowSec >= it->second)
             return true;
         return false;
+    }
+
+    inline bool TryClaimRealPlayerChallenge(std::uint32_t playerGuidLow, std::uint32_t nowSec, std::uint32_t cooldownSec)
+    {
+        ReservationRegistry& registry = GetReservationRegistry();
+        std::lock_guard<std::mutex> lock(registry.Mutex);
+
+        // Bounded pruning of expired cooldowns to prevent unbounded memory growth
+        if (registry.RealPlayerCooldowns.size() > 256)
+        {
+            for (auto it = registry.RealPlayerCooldowns.begin(); it != registry.RealPlayerCooldowns.end();)
+            {
+                if (nowSec >= it->second)
+                    it = registry.RealPlayerCooldowns.erase(it);
+                else
+                    ++it;
+            }
+        }
+
+        // Hard cap to prevent memory exhaustion under adversarial / high-churn conditions
+        if (registry.RealPlayerCooldowns.size() >= MAX_REAL_PLAYER_COOLDOWNS)
+        {
+            auto oldestIt = registry.RealPlayerCooldowns.begin();
+            for (auto it = registry.RealPlayerCooldowns.begin(); it != registry.RealPlayerCooldowns.end(); ++it)
+            {
+                if (it->second < oldestIt->second)
+                    oldestIt = it;
+            }
+            if (oldestIt != registry.RealPlayerCooldowns.end() && nowSec >= oldestIt->second)
+                registry.RealPlayerCooldowns.erase(oldestIt);
+            else
+                return false; // Active cooldown protection: reject claim when ledger is saturated with unexpired records
+        }
+
+        auto it = registry.RealPlayerCooldowns.find(playerGuidLow);
+        if (it != registry.RealPlayerCooldowns.end() && nowSec < it->second)
+            return false;
+
+        registry.RealPlayerCooldowns[playerGuidLow] = nowSec + cooldownSec;
+        return true;
+    }
+
+    inline void ReleaseRealPlayerChallengeClaim(std::uint32_t playerGuidLow, std::uint32_t claimExpirySec)
+    {
+        ReservationRegistry& registry = GetReservationRegistry();
+        std::lock_guard<std::mutex> lock(registry.Mutex);
+
+        auto it = registry.RealPlayerCooldowns.find(playerGuidLow);
+        if (it != registry.RealPlayerCooldowns.end() && it->second == claimExpirySec)
+            registry.RealPlayerCooldowns.erase(it);
     }
 
     inline void RecordRealPlayerChallenge(std::uint32_t playerGuidLow, std::uint32_t nowSec, std::uint32_t cooldownSec)
@@ -474,6 +577,17 @@ namespace PlayerbotsLife
                 else
                     ++it;
             }
+        }
+        if (registry.RealPlayerCooldowns.size() >= MAX_REAL_PLAYER_COOLDOWNS)
+        {
+            auto oldestIt = registry.RealPlayerCooldowns.begin();
+            for (auto it = registry.RealPlayerCooldowns.begin(); it != registry.RealPlayerCooldowns.end(); ++it)
+            {
+                if (it->second < oldestIt->second)
+                    oldestIt = it;
+            }
+            if (oldestIt != registry.RealPlayerCooldowns.end() && nowSec >= oldestIt->second)
+                registry.RealPlayerCooldowns.erase(oldestIt);
         }
         registry.RealPlayerCooldowns[playerGuidLow] = nowSec + cooldownSec;
     }
@@ -585,6 +699,8 @@ namespace PlayerbotsLife
                 token.AssignmentId = ++registry.NextGeneration;
                 token.Generation = token.AssignmentId;
                 token.State = LeaseState::Provisional;
+                token.IsLegacy = false;
+                token.StateTimestampSec = nowSec;
                 registry.Owners[guid] = token.Owner;
                 registry.Leases[guid] = token;
                 grant.Tokens.push_back(token);
@@ -648,8 +764,11 @@ namespace PlayerbotsLife
     // Truthful Diagnostics Snapshot
     // -------------------------------------------------------------
 
-    inline CooperationSnapshot GetCooperationSnapshot()
+    inline CooperationSnapshot GetCooperationSnapshot(std::uint32_t nowSec = 0)
     {
+        if (nowSec == 0)
+            nowSec = static_cast<std::uint32_t>(std::time(nullptr));
+
         ReservationRegistry& registry = GetReservationRegistry();
         std::lock_guard<std::mutex> lock(registry.Mutex);
 
@@ -670,17 +789,80 @@ namespace PlayerbotsLife
                 ++snap.ArtisansCount;
         }
 
+        constexpr std::uint32_t STALE_PROVISIONAL_THRESHOLD_SEC = 30;
+        constexpr std::uint32_t STALE_RELEASING_THRESHOLD_SEC = 60;
+
         for (auto const& pair : registry.Leases)
         {
+            std::uint32_t age = (nowSec >= pair.second.StateTimestampSec && pair.second.StateTimestampSec > 0)
+                ? (nowSec - pair.second.StateTimestampSec) : 0;
+
             if (pair.second.State == LeaseState::Provisional)
+            {
                 ++snap.ProvisionalCount;
+                if (age >= STALE_PROVISIONAL_THRESHOLD_SEC)
+                    ++snap.StaleProvisionalCount;
+                if (age > snap.OldestProvisionalAgeSec)
+                    snap.OldestProvisionalAgeSec = age;
+            }
             else if (pair.second.State == LeaseState::Active)
+            {
                 ++snap.ActiveCount;
+            }
             else if (pair.second.State == LeaseState::Releasing)
+            {
                 ++snap.ReleasingCount;
+                if (age >= STALE_RELEASING_THRESHOLD_SEC)
+                    ++snap.StaleReleasingCount;
+                if (age > snap.OldestReleasingAgeSec)
+                    snap.OldestReleasingAgeSec = age;
+            }
         }
 
         return snap;
+    }
+
+    // -------------------------------------------------------------
+    // Stale Lease Scavenger (Bounded World-Thread Recovery)
+    // -------------------------------------------------------------
+
+    inline std::size_t ScavengeStaleLeases(std::uint32_t nowSec = 0,
+                                           std::uint32_t provisionalTtlSec = 30,
+                                           std::uint32_t releasingTtlSec = 60,
+                                           std::vector<LeaseToken>* outScavenged = nullptr)
+    {
+        if (nowSec == 0)
+            nowSec = static_cast<std::uint32_t>(std::time(nullptr));
+
+        ReservationRegistry& registry = GetReservationRegistry();
+        std::lock_guard<std::mutex> lock(registry.Mutex);
+
+        std::size_t scavengedCount = 0;
+        for (auto it = registry.Leases.begin(); it != registry.Leases.end();)
+        {
+            if (it->second.StateTimestampSec == 0)
+                it->second.StateTimestampSec = nowSec;
+
+            bool isStaleProvisional = (it->second.State == LeaseState::Provisional &&
+                                       nowSec >= it->second.StateTimestampSec + provisionalTtlSec);
+            bool isStaleReleasing = (it->second.State == LeaseState::Releasing &&
+                                     nowSec >= it->second.StateTimestampSec + releasingTtlSec);
+
+            if (isStaleProvisional || isStaleReleasing)
+            {
+                if (outScavenged)
+                    outScavenged->push_back(it->second);
+
+                registry.Owners.erase(it->first);
+                it = registry.Leases.erase(it);
+                ++scavengedCount;
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        return scavengedCount;
     }
 
     // -------------------------------------------------------------
@@ -705,7 +887,7 @@ namespace PlayerbotsLife
     inline bool TryReserve(std::uint32_t guidLow, ReservationOwner owner)
     {
         LeaseToken token;
-        return TryAcquireLease(token, guidLow, owner, 0, LeaseState::Active);
+        return TryAcquireLease(token, guidLow, owner, 0, LeaseState::Active, 0, true);
     }
 
     inline void Release(std::uint32_t guidLow, ReservationOwner owner)
@@ -716,8 +898,8 @@ namespace PlayerbotsLife
         if (entry != registry.Owners.end() && entry->second == owner)
         {
             auto leaseIt = registry.Leases.find(guidLow);
-            // GUID-only legacy release must not delete modern generation-protected leases
-            if (leaseIt != registry.Leases.end() && leaseIt->second.Generation > 0)
+            // GUID-only legacy release must not delete modern generation-protected non-legacy leases
+            if (leaseIt != registry.Leases.end() && !leaseIt->second.IsLegacy)
                 return;
 
             registry.Owners.erase(entry);

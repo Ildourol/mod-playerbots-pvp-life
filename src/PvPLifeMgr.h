@@ -48,7 +48,8 @@ namespace PvPLife
         std::vector<Zone> LoadZones(bool readyOnly = false, int typeFilter = -1);
         bool LoadZoneByName(std::string name, Zone& out);
         void LoadZoneConfig();
-        void QueueZoneMutation(std::string const& sql);
+        bool QueueZoneMutation(std::string const& sql);
+        bool IsDuelSlotInUse(uint32 slotId) const;
         void RefreshAccountCache();
         void ApplyZoneConfig(Zone& zone) const;
         Zone ReadZone(Field* fields);
@@ -303,12 +304,49 @@ namespace PvPLife
         std::unordered_map<uint8, uint32> _offlineCandidateRefresh;
         std::unordered_set<uint8> _offlineCandidateQueries;
         mutable std::unordered_map<uint32, uint32> _zoneLastRealPlayerTime;
+        uint32 _lastCooldownPruneTime = 0;
+        void PruneExpiredCooldowns();
+
+        struct RealPlayerSnapshotEntry
+        {
+            uint32 GuidLow = 0;
+            uint32 MapId = 0;
+            uint32 ZoneId = 0;
+            uint32 AreaId = 0;
+            TeamSide Team = TeamSide::Any;
+            uint8 Level = 0;
+            float X = 0.0f;
+            float Y = 0.0f;
+            float Z = 0.0f;
+            float O = 0.0f;
+            bool IsAlive = true;
+            bool IsPvP = false;
+            bool InCombat = false;
+            bool HasDuel = false;
+            bool IsGameMaster = false;
+            uint32 Security = 0;
+            bool IsGroupLeader = false;
+            uint32 GroupMembersCount = 0;
+        };
+        mutable std::vector<RealPlayerSnapshotEntry> _cachedRealPlayers;
+        mutable uint32 _lastRealPlayerCensusTimeMs = 0;
+        void UpdateRealPlayersSnapshot() const;
+
+        enum class ReleasePhase : uint8
+        {
+            PendingCombatExit = 0,
+            RestoreWhenSafe   = 1,
+            Released          = 2
+        };
 
         struct ReleasingParticipant
         {
             Participant Part;
             uint32 EnqueuedAt = 0;
             uint32 Deadline = 0;
+            uint32 LastProgress = 0;
+            uint32 Attempts = 0;
+            ReleasePhase Phase = ReleasePhase::PendingCombatExit;
             bool ReturnHome = false;
         };
         std::vector<ReleasingParticipant> _releasingParticipants;
