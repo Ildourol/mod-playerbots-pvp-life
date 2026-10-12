@@ -15,7 +15,9 @@ An AzerothCore + mod-playerbots module focused on making the open world feel ali
 
 - **Persistent World PvP & Frontlines:** Keeps outdoor PvP skirmishes actively running across 35+ configured hotspots throughout Eastern Kingdoms, Kalimdor, Outland, and Northrend.
 - **Reactive Raid Defense:** Automatically detects qualifying outdoor player-led invasion raids (20+ members, PvP-flagged leader), staging an opposing faction defense force 120 yards away in 9 formation lanes at 4-yard spacing before advancing 25 yards to engage.
-- **Capital Gate Duel Arenas:** Near-continuous bot-vs-bot duel activity outside Stormwind and Orgrimmar gates. Both `mod-playerbots-pvp-life` and `mod-playerbots-city-life` run gate duels concurrently without interference.
+- **Unified Capital Gate Duel Arenas:** Dynamic, natural bot-vs-bot duel activity outside capital gates (Stormwind, Orgrimmar, Ironforge, Undercity, Dalaran Underbelly). Dueling is unified and centralized exclusively under `mod-playerbots-pvp-life`.
+- **Natural Duel Movement & Approach:** Challengers actively move toward opponents taking varied paths with angular flank offsets rather than rigid straight lines. Idle bots remain anchored in the duel grounds after victory/defeat, eliminating restless map-wide running back-and-forth.
+- **Proximity-Prioritized Partner Selection:** Duel scheduling prioritizes nearby contenders within the duel arena, eliminating erratic crossing across the duel grounds.
 - **Bot-to-Player Duel Challenges:** Bots in duel arenas challenge nearby real players with configurable level-difference checks and strict anti-spam cooldowns.
 - **For the Horde & For the Alliance Campaigns:** Faction pressure pushes towards enemy capitals with organic defender yells and world chat reactions.
 - **Mutual Anti-Stealing Reservation Barrier:** Standalone-safe, thread-safe shared reservation registry (`PlayerbotsLife::ReservationRegistry`) ensuring bots borrowed by City Life are never stolen or commanded by PvP Life, and vice versa.
@@ -24,7 +26,7 @@ An AzerothCore + mod-playerbots module focused on making the open world feel ali
 - **Zero GM Spam Protection:** Game Masters and administrators are strictly exempt from unsolicited duel challenges, yells, or world announcements.
 - **Silent-by-Default Chatter & Announcements:** All automated bot chatter, yells, and server-wide announcements default to OFF (`0`) in config for a clean, natural player atmosphere.
 - **Instant Disengagement on Invite or Logout:** Combatants and duelers immediately drop PvP Life activities if invited to a player group or logged out.
-- **Shared Duel Staging Lattice (20yd Spacing):** Prevents duel area collisions outside Stormwind and Orgrimmar gates when running concurrently with `mod-playerbots-city-life`.
+- **Shared Duel Staging Lattice:** 20-yard minimum separation and varied pair staging orientations ensure bots never clip or overlap during dueling.
 - **Asynchronous Non-Blocking Audit Logger:** Dedicated worker thread writing to `Logs/pvplife_audit.log` tracking `MOVE`, `DUEL`, `START`, `MEMBER`, `DUEL_QUEUE`, `END`, `RETURN`, `REACTIVE_START`, and `CONFIG` events with zero world-thread blocking I/O.
 - **100% Backward-Compatible `.wpvp` GM Command Aliases:** All 14 `.wpvp` commands from the legacy world PvP module work natively as aliases within PvP Life.
 

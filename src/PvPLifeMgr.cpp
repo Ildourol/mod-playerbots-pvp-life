@@ -1456,13 +1456,33 @@ namespace PvPLife
     {
         if (!player || player->IsBeingTeleported())
             return;
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) || !std::isfinite(o) || z <= -1000.0f)
+            return;
         if (player->IsInCombat())
             player->CombatStop(true);
 
         if (teleport || player->GetMapId() != mapId || !_useMovePoint)
+        {
             player->TeleportTo(mapId, x, y, z, o);
+            if (PlayerbotAI* ai = GET_PLAYERBOT_AI(player))
+                ai->HandleTeleportAck();
+        }
         else
+        {
+            if (player->GetMap() && player->GetMapId() == mapId)
+            {
+                float probedZ = player->GetMap()->GetHeight(player->GetPhaseMask(), x, y, z);
+                if (probedZ > -1000.0f && std::abs(probedZ - z) < 15.0f)
+                    z = probedZ;
+            }
+
+            if (player->isMoving() && player->GetDistance2d(x, y) <= 2.0f)
+                return;
+
+            player->ClearUnitState(UNIT_STATE_CHASE | UNIT_STATE_FOLLOW);
+            player->GetMotionMaster()->Clear();
             player->GetMotionMaster()->MovePoint(0, x, y, z);
+        }
     }
 
     void Manager::EngageTarget(Player* bot, Player* target)
@@ -1905,21 +1925,39 @@ namespace PvPLife
                 sy = slot.CenterY;
                 sz = slot.CenterZ;
 
-                float baseAngle = zone.RallyO;
-                float offsetDist = 3.0f;
-                float ax = sx - std::cos(baseAngle) * offsetDist;
-                float ay = sy - std::sin(baseAngle) * offsetDist;
-                float az = sz;
-                if (playerA->GetMap())
-                    az = playerA->GetMap()->GetHeight(playerA->GetPhaseMask(), ax, ay, sz);
-                float ao = baseAngle;
+                Map* zoneMap = sMapMgr->FindBaseMap(zone.MapId);
+                if (zoneMap)
+                {
+                    float probedCenter = zoneMap->GetHeight(sx, sy, sz);
+                    if (probedCenter > -1000.0f)
+                        sz = probedCenter;
+                }
 
-                float bx = sx + std::cos(baseAngle) * offsetDist;
-                float by = sy + std::sin(baseAngle) * offsetDist;
+                // Varied pair orientation and distance so bots face each other naturally without identical lines
+                float pairAngle = Position::NormalizeOrientation(zone.RallyO + static_cast<float>(i) * 1.047197f + frand(-0.35f, 0.35f));
+                float offsetDist = 2.5f + frand(0.0f, 1.2f);
+
+                float ax = sx - std::cos(pairAngle) * offsetDist;
+                float ay = sy - std::sin(pairAngle) * offsetDist;
+                float az = sz;
+                if (zoneMap)
+                {
+                    float probedZ = zoneMap->GetHeight(ax, ay, sz);
+                    if (probedZ > -1000.0f)
+                        az = probedZ;
+                }
+                float ao = pairAngle;
+
+                float bx = sx + std::cos(pairAngle) * offsetDist;
+                float by = sy + std::sin(pairAngle) * offsetDist;
                 float bz = sz;
-                if (playerB->GetMap())
-                    bz = playerB->GetMap()->GetHeight(playerB->GetPhaseMask(), bx, by, sz);
-                float bo = Position::NormalizeOrientation(baseAngle + 3.14159265f);
+                if (zoneMap)
+                {
+                    float probedZ = zoneMap->GetHeight(bx, by, sz);
+                    if (probedZ > -1000.0f)
+                        bz = probedZ;
+                }
+                float bo = Position::NormalizeOrientation(pairAngle + 3.14159265f);
 
                 // Setup Part A
                 partA.Bot = candA;
@@ -2479,27 +2517,57 @@ namespace PvPLife
                 fail("Target requirements not met", targetResult);
                 continue;
             }
-            float approachDistance = DuelApproachDistance(challenger->GetSpellMaxRangeForTarget(target, spell));
-            if (challenger->GetExactDist(target) > approachDistance || !challenger->IsWithinLOSInMap(target))
+            float const closeChallengeDistance = 4.0f;
+            float const exactDist = challenger->GetExactDist(target);
+            if (exactDist > closeChallengeDistance || !challenger->IsWithinLOSInMap(target))
             {
                 DuelStep retry = step;
                 if (retry.RetryCount++ < DuelApproachRetries)
                 {
-                    float x, y, z;
-                    target->GetNearPoint(challenger, x, y, z, challenger->GetCombatReach(),
-                        std::min(3.0f, approachDistance * 0.5f), target->GetAngle(challenger));
-                    challenger->GetMotionMaster()->MovePoint(0, x, y, z);
-                    retry.ExecuteAt = now + 3;
+                    // Compute varied approach destination with flank arc offset so bots don't all follow the same straight line
+                    float const baseAngle = target->GetAngle(challenger);
+                    float const flankOffset = frand(-0.45f, 0.45f);
+                    float const approachAngle = Position::NormalizeOrientation(baseAngle + flankOffset);
+                    float const approachDist = 2.5f + frand(0.2f, 1.0f);
+
+                    float nx = target->GetPositionX() + std::cos(approachAngle) * approachDist;
+                    float ny = target->GetPositionY() + std::sin(approachAngle) * approachDist;
+                    float nz = target->GetPositionZ();
+                    if (target->GetMap())
+                    {
+                        float probedZ = target->GetMap()->GetHeight(target->GetPhaseMask(), nx, ny, nz);
+                        if (probedZ > -1000.0f && std::abs(probedZ - nz) < 8.0f)
+                            nz = probedZ;
+                    }
+
+                    challenger->SetSelection(target->GetGUID());
+                    target->SetFacingToObject(challenger);
+
+                    if (!challenger->isMoving() || challenger->GetDistance2d(nx, ny) > 2.0f)
+                    {
+                        challenger->ClearUnitState(UNIT_STATE_CHASE | UNIT_STATE_FOLLOW);
+                        challenger->GetMotionMaster()->Clear();
+                        challenger->GetMotionMaster()->MovePoint(0, nx, ny, nz);
+                    }
+
+                    retry.ExecuteAt = now + 1;
                     keep.push_back(retry);
                 }
                 else
                     fail("Approach or line-of-sight timeout", SPELL_FAILED_OUT_OF_RANGE);
                 continue;
             }
+
+            challenger->StopMoving();
+            challenger->GetMotionMaster()->Clear();
             challenger->SetFacingToObject(target);
             if (!step.TargetIsRealPlayer)
             {
+                target->StopMoving();
+                target->GetMotionMaster()->Clear();
                 target->SetFacingToObject(challenger);
+                if (roll_chance_i(40))
+                    challenger->HandleEmoteCommand(EMOTE_ONESHOT_BOW);
                 challenger->SetHealth(challenger->GetMaxHealth());
                 target->SetHealth(target->GetMaxHealth());
                 challenger->SetPower(challenger->getPowerType(), challenger->GetMaxPower(challenger->getPowerType()));
@@ -2741,7 +2809,18 @@ namespace PvPLife
                     continue;
                 }
 
-                uint32 secondIndex = compatibleIndexes[urand(0, static_cast<uint32>(compatibleIndexes.size() - 1))];
+                // Prioritize closest available partners to eliminate unnecessary long-distance running across the duel field
+                std::sort(compatibleIndexes.begin(), compatibleIndexes.end(), [&](uint32 idx1, uint32 idx2)
+                {
+                    Player* p1 = FindPlayer(available[idx1]);
+                    Player* p2 = FindPlayer(available[idx2]);
+                    if (!p1 || !p2) return p1 != nullptr;
+                    return a->GetDistance2d(p1) < a->GetDistance2d(p2);
+                });
+
+                // Pick from nearest candidates (up to 2 closest) to preserve subtle variety while staying nearby
+                uint32 pickLimit = std::min<uint32>(static_cast<uint32>(compatibleIndexes.size()), 2);
+                uint32 secondIndex = compatibleIndexes[urand(0, pickLimit - 1)];
                 uint32 second = available[secondIndex];
                 Player* b = FindPlayer(second);
 
@@ -2813,11 +2892,32 @@ namespace PvPLife
 
                 bool wrongMap = (bot->GetMapId() != event.EventZone.MapId);
                 float dist = wrongMap ? 9999.0f : bot->GetDistance2d(participant.ActivityX, participant.ActivityY);
+                float distFromCenter = wrongMap ? 9999.0f : bot->GetDistance2d(event.EventZone.RallyX, event.EventZone.RallyY);
 
-                if (wrongMap || dist > _duelLeashRadius)
+                // If the bot has concluded a duel and is within the duel grounds, retain its current position
+                // as its staging spot instead of forcing it to walk 40+ yards back to its initial slot.
+                // This drastically reduces restless running across the duel grounds!
+                if (!wrongMap && distFromCenter <= static_cast<float>(_duelLeashRadius) &&
+                    std::hypot(bot->GetPositionX() - participant.ActivityX, bot->GetPositionY() - participant.ActivityY) > 4.0f)
+                {
+                    for (Participant& p : const_cast<ActiveEvent&>(event).Members)
+                    {
+                        if (p.Bot.GuidLow == participant.Bot.GuidLow)
+                        {
+                            p.ActivityX = bot->GetPositionX();
+                            p.ActivityY = bot->GetPositionY();
+                            p.ActivityZ = bot->GetPositionZ();
+                            p.ActivityO = bot->GetOrientation();
+                            dist = 0.0f;
+                            break;
+                        }
+                    }
+                }
+
+                if (wrongMap || distFromCenter > static_cast<float>(_duelLeashRadius) * 1.3f)
                 {
                     _botLastRelocateTime[participant.Bot.GuidLow] = now;
-                    if (wrongMap || dist > 60.0f)
+                    if (wrongMap || distFromCenter > 60.0f)
                     {
                         // Cross-map or extremely far: teleport
                         MoveBot(bot, event.EventZone.MapId, participant.ActivityX, participant.ActivityY,
@@ -2855,6 +2955,15 @@ namespace PvPLife
                     bot->GetMotionMaster()->Clear();
                     bot->ClearUnitState(UNIT_STATE_CHASE);
                     bot->ClearUnitState(UNIT_STATE_FOLLOW);
+                }
+
+                // Idle spectating: occasionally cheer/applaud nearby duels
+                if (!bot->isMoving() && roll_chance_i(4))
+                {
+                    static uint32 const spectateEmotes[] = {
+                        EMOTE_ONESHOT_APPLAUD, EMOTE_ONESHOT_CHEER, EMOTE_ONESHOT_ROAR, EMOTE_ONESHOT_FLEX
+                    };
+                    bot->HandleEmoteCommand(spectateEmotes[urand(0, 3)]);
                 }
             }
         }
