@@ -1,4 +1,4 @@
--- Auto-update migration: create pvp_life_chat if missing and seed baseline capital defense chatter
+-- Auto-update migration: create pvp_life_chat if missing and seed baseline capital defense dialogue
 -- Fully idempotent and non-destructive
 
 CREATE TABLE IF NOT EXISTS `pvp_life_chat` (

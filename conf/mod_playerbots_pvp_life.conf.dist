@@ -104,9 +104,10 @@ PvPLife.Bots.QueryLimit = 500
 #
 #   PvPLife.Bots.MinOnlineRequired
 #       Description: Minimum ready population required across both sides to start an activity.
-#       Default:     3
+#                    Set to 2 to allow 1v1 duels and low-scale roaming skirmishes.
+#       Default:     2
 #
-PvPLife.Bots.MinOnlineRequired = 3
+PvPLife.Bots.MinOnlineRequired = 2
 
 #
 #   PvPLife.Bots.GlobalMinLevel
@@ -251,9 +252,9 @@ PvPLife.Combat.EngageMaxRetries = 12
 #   PvPLife.Strategies.Combat / NonCombat / DuelNonCombat
 #       Description: Strategy expressions assigned to bots during combat, roaming, and duels.
 #
-PvPLife.Strategies.Combat = "+pvp,+boost,+dps debuff,-passive,-stay"
-PvPLife.Strategies.NonCombat = "+pvp,+boost,-passive,-stay"
-PvPLife.Strategies.DuelNonCombat = "+duel,+pvp,+boost,+stay,-follow,-passive,-grind"
+PvPLife.Strategies.Combat = "+pvp,+boost,+dps debuff,-passive,-stay,-chat,-emote,-rpg,-travel"
+PvPLife.Strategies.NonCombat = "+pvp,+boost,-passive,-stay,-chat,-emote,-rpg,-travel"
+PvPLife.Strategies.DuelNonCombat = "+duel,+pvp,+boost,+stay,-follow,-passive,-grind,-chat,-emote,-rpg,-travel"
 
 ###################################################################################################
 # Persistent World PvP
@@ -324,6 +325,13 @@ PvPLife.Duel.LeashRadius = 40
 PvPLife.Duel.GuardIntervalMs = 1000
 
 #
+#   PvPLife.Duel.RelocateCooldownSeconds
+#       Description: Minimum cooldown in seconds between repositioning / return commands for duel bots.
+#       Default:     20
+#
+PvPLife.Duel.RelocateCooldownSeconds = 20
+
+#
 #   PvPLife.Duel.ChallengeRealPlayers
 #       Description: Allow bots in duel zones to challenge nearby real players.
 #       Default:     1 (Enabled)
@@ -347,7 +355,7 @@ PvPLife.FactionCampaign.ChancePerTick = 12
 PvPLife.FactionCampaign.GlobalCooldownSeconds = 3600
 
 ###################################################################################################
-# Natural Bot Chatter
+# Natural Bot Chat
 ###################################################################################################
 
 PvPLife.BotChat.Enable = 0

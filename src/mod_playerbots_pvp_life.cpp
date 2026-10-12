@@ -6,7 +6,6 @@
 
 #include "PvPLifeMgr.h"
 #include "LifeBotReservation.h"
-#include "LifeTelemetryBridge.h"
 
 #include "Chat.h"
 #include "CommandScript.h"
@@ -107,8 +106,8 @@ public:
     {
         static ChatCommandTable commandTable =
         {
-            { "pvplife", HandlePvPLifeCommand, SEC_GAMEMASTER,    Console::Yes },
-            { "wpvp",    HandleWpvpCommand,    SEC_ADMINISTRATOR, Console::Yes }
+            { "pvplife", HandlePvPLifeCommand, SEC_GAMEMASTER, Console::Yes },
+            { "wpvp",    HandleWpvpCommand,    SEC_GAMEMASTER, Console::Yes }
         };
         return commandTable;
     }
@@ -130,7 +129,6 @@ void AddPvPLifeScripts()
         "PvP Life requires LifeBotReservation protocol version 2026101104");
 
     PlayerbotsLife::RegisterActiveModule(PlayerbotsLife::MODULE_PVP_LIFE);
-    PlayerbotsLife::RegisterTelemetryBridge();
     new PvPLifeWorldScript();
     new PvPLifePlayerScript();
     new PvPLifeGroupScript();

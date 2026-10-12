@@ -124,7 +124,6 @@ namespace PlayerbotsLife
         ReservationOwner CurrentPriorityOwner{ReservationOwner::CityLife};
         std::vector<AdmissionRequest> PendingAdmissionRequests;
         std::vector<AdmissionGrant> RecentAdmissionGrants;
-        std::atomic<bool> TelemetryBridgeRegistered{false};
     };
 
     inline ReservationRegistry& GetReservationRegistry()

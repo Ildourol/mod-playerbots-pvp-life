@@ -95,7 +95,7 @@ VALUES
 ('BlackrockMountain',0,0,2,2,50,60,0, -7500,-1100,270,0, -7550,-1250,270,0, 4,10,4,10, 10,25, 100, 2400, 0, 0, 0),
 ('LightHopeChapel',0,0,1,0,55,60,0, 2250,-5300,85,0, 2280,-5310,85,0, 4,10,4,10, 10,25, 90, 3600, 0, 0, 0);
 
--- Seed chatter for faction capital battles (non-destructive insert if absent)
+-- Seed dialogue lines for faction capital battles (non-destructive insert if absent)
 INSERT INTO `pvp_life_chat` (`enabled`,`activity_type`,`channel`,`speaker_team`,`text`,`weight`)
 SELECT * FROM (
   -- For the Horde: Alliance defenders reacting.

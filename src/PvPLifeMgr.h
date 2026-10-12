@@ -39,6 +39,17 @@ namespace PvPLife
         void OnPlayerLogout(uint32 guidLow);
         void OnAddGroupMember(uint32 guidLow);
 
+        // Telemetry Accessors
+        uint32 GetLiveBotCensus() const { return GetLiveWorldBotCount(); }
+        uint32 GetTargetPopulationBudget() const { return CalculatePopulationBudget(); }
+        uint32 GetActiveParticipantCount() const;
+        uint32 GetPendingCount() const { return static_cast<uint32>(_pendingResponses.size()); }
+        uint32 GetReleasingCount() const { return static_cast<uint32>(_releasingParticipants.size()); }
+        void BuildTelemetryRoster(std::vector<std::string>& outRecords) const;
+        void BuildTelemetryZones(std::string& outPayload) const;
+        void BuildTelemetryQueues(std::string& outPayload) const;
+        bool BuildBotDetail(uint32 guidLow, std::string& outPayload) const;
+
     private:
         Manager() = default;
 
@@ -99,7 +110,6 @@ namespace PvPLife
         void CaptureAIState(Player* player, AIStateJournal& journal) const;
         void RestoreAIState(Player* player, AIStateJournal const& journal) const;
         void CloseNativeDuel(Player* player, Participant const& participant) const;
-
         static bool TryParseUInt32(std::string const& str, uint32& outVal);
         static bool TryParseUInt64(std::string const& str, uint64& outVal);
         static bool TryParseFloat(std::string const& str, float& outVal);
@@ -159,7 +169,7 @@ namespace PvPLife
         uint32 _botAccountMax = 0;
         AccountFilterMode _accountFilterMode = AccountFilterMode::LegacyAny;
         uint32 _botQueryLimit = 500;
-        uint32 _minOnlineRequired = 3;
+        uint32 _minOnlineRequired = 2;
         uint8 _globalMinLevel = 20;
         bool _skipGroupedBots = true;
         bool _respectPlayerbotActivity = false;
@@ -184,9 +194,9 @@ namespace PvPLife
         uint32 _engageRetrySeconds = 5;
         uint32 _engageMaxRetries = 12;
 
-        std::string _pvpCombatStrategies = "+pvp,+boost,+dps debuff,-passive,-stay";
-        std::string _pvpNonCombatStrategies = "+pvp,+boost,-passive,-stay";
-        std::string _duelNonCombatStrategies = "+duel,+pvp,+boost,+stay,-follow,-passive,-grind";
+        std::string _pvpCombatStrategies = "+pvp,+boost,+dps debuff,-passive,-stay,-chat,-emote,-rpg,-travel";
+        std::string _pvpNonCombatStrategies = "+pvp,+boost,-passive,-stay,-chat,-emote,-rpg,-travel";
+        std::string _duelNonCombatStrategies = "+duel,+pvp,+boost,+stay,-follow,-passive,-grind,-chat,-emote,-rpg,-travel";
 
         // Persistent World PvP
         bool _alwaysActiveWorldPvp = true;
@@ -212,8 +222,9 @@ namespace PvPLife
         uint32 _botChallengeCooldownSeconds = 180;
         uint32 _botDuelCooldownSeconds = 45;
         uint32 _botDuelMaxLevelDifference = 5;
+        uint32 _duelRelocateCooldownSeconds = 20;
 
-        // Campaigns & chatter
+        // Campaigns & chat
         bool _forTheHordeEnable = true;
         bool _forTheAllianceEnable = true;
         uint32 _factionCampaignChance = 12;
@@ -306,6 +317,8 @@ namespace PvPLife
         mutable std::unordered_map<uint32, uint32> _zoneLastRealPlayerTime;
         uint32 _lastCooldownPruneTime = 0;
         void PruneExpiredCooldowns();
+
+        std::unordered_map<uint32, uint32> _botLastRelocateTime;
 
         struct RealPlayerSnapshotEntry
         {
